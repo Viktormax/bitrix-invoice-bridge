@@ -1,18 +1,31 @@
 # Bitrix-InVoice Bridge
 
-A bidirectional event-driven bridge between **InVoice** (Enel Campaign Orchestrator / ECO) and **Bitrix24**, designed for production use with emphasis on reliability, security, and observability.
+A bridge between **InVoice** (Enel Campaign Orchestrator / ECO) and **Bitrix24**, designed for production use with emphasis on reliability, security, and observability.
 
 ## Overview
 
-This project enables seamless integration between InVoice and Bitrix24, facilitating real-time synchronization of lead data and campaign information. The bridge operates on an event-driven architecture, ensuring that data flows efficiently and reliably between both systems.
+This project provides the foundation for integrating InVoice and Bitrix24. Currently, the system receives webhook events from InVoice (e.g., `LEAD_AVAILABLE`) with comprehensive forensic logging. The integration with Bitrix24 for processing and synchronizing lead data is planned for future implementation.
+
+### Current Status
+
+**Phase 1 (Implemented)**:
+- ✅ Webhook endpoint for receiving InVoice events
+- ✅ OAuth2 JWT Bearer authentication for InVoice API
+- ✅ Forensic logging with sensitive data masking
+- ✅ API client for InVoice API calls
+
+**Phase 2 (Planned)**:
+- ⏳ Bitrix24 integration for lead synchronization
+- ⏳ Event processing and business logic
+- ⏳ Retry mechanisms and idempotency
+- ⏳ Bidirectional synchronization
 
 ### Key Principles
 
-- **Event-Driven**: The system reacts to events from both InVoice and Bitrix24, processing them asynchronously when possible
-- **Idempotency**: All operations are designed to be safely retryable without side effects
-- **Retry Logic**: Built-in retry mechanisms for transient failures
 - **Security**: Token-based authentication, input validation, and secure handling of sensitive data
-- **Comprehensive Logging**: Detailed logging for debugging, auditing, and monitoring
+- **Comprehensive Logging**: Detailed forensic logging for debugging, auditing, and monitoring
+- **Production-Ready**: Optimized for InVoice timeout requirements (3s connection, 5s read)
+- **Extensible**: Designed to support future Bitrix24 integration and event processing
 
 ## Requirements
 
@@ -36,6 +49,7 @@ This project enables seamless integration between InVoice and Bitrix24, facilita
 ├── .env                 # Environment configuration (not committed)
 ├── .env.example         # Environment template
 ├── composer.json        # PHP dependencies
+├── composer.lock        # Locked dependency versions (committed for reproducible builds)
 └── README.md           # This file
 ```
 
@@ -75,14 +89,13 @@ The application is configured via environment variables in the `.env` file. See 
 #### InVoice API OAuth2 Configuration
 - `INVOICE_API_BASE_URL`: Base URL for InVoice API (default: `https://enel.in-voice.it`, alternative: `https://enel.in-voice.biz`)
 - `INVOICE_CLIENT_ID`: OAuth2 client ID (provided by Enel)
-- `INVOICE_JWK_JSON`: JWK (JSON Web Key) containing RSA private key in JSON format. Must include all RSA components: `n`, `e`, `d`, `p`, `q`, `dp`, `dq`, `qi`
-
-**Alternative**: If you have a pre-converted PEM format private key, you can use:
-- `INVOICE_JWK_PRIVATE_KEY`: RSA private key in PEM format
+- `INVOICE_JWK_JSON`: JWK (JSON Web Key) containing RSA private key in JSON format, OR RSA private key in PEM format. 
+  - **JWK format**: Must include all RSA components: `n`, `e`, `d`, `p`, `q`, `dp`, `dq`, `qi`
+  - **PEM format**: If you have a pre-converted PEM private key, you can use it directly (the code detects PEM format automatically)
 
 #### Application Configuration
 - `APP_ENV`: Application environment (`production`, `development`, `staging`)
-- `LOG_DIR`: Directory path for log files (default: `storage/logs`)
+- `LOG_DIR`: Directory path for log files (default: `storage/logs/invoice-webhook`)
 
 ### Optional Environment Variables
 
@@ -150,9 +163,20 @@ vendor/bin/phpunit tests/InvoiceApiClientTest.php
 
 ### Test Coverage
 
-The project includes unit tests in the `tests/` directory:
-- `InvoiceApiClientTest`: OAuth2 authentication and API client functionality
-- `WebhookLoggerTest`: Logging functionality and sensitive data masking
+The project includes comprehensive unit tests in the `tests/` directory:
+- `InvoiceApiClientTest`: 
+  - OAuth2 JWT generation (structure, claims, RS256 signature)
+  - JWK to PEM conversion
+  - Base64URL encoding/decoding
+  - Token caching
+  - API client functionality
+- `WebhookLoggerTest`: 
+  - Logging functionality and sensitive data masking
+  - Body truncation for large payloads
+  - Large body file saving
+  - JSON decoding and error handling
+  - Remote IP detection (X-Forwarded-For, X-Real-IP)
+  - Forensic logging completeness
 
 ### Utility Scripts
 
@@ -217,20 +241,24 @@ The project includes multiple layers of protection to prevent unauthorized acces
 After deployment, you can verify that sensitive files are protected by running:
 
 ```bash
-php scripts/test_security.php https://yourdomain.com
+php tests-manual/test_security.php https://yourdomain.com
 ```
 
 This script will test that `.env` and other sensitive files return 403/404 instead of exposing their contents.
 
+**Note**: The `test_security.php` script is located in `tests-manual/` directory (not committed to repository).
+
 ## Logging
 
-Application logs are stored in `storage/logs/` with automatic daily rotation. Log files are named by date (e.g., `YYYY-MM-DD.log`).
+Application logs are stored in `storage/logs/invoice-webhook/` (configurable via `LOG_DIR` environment variable) with automatic daily rotation. Log files are named by date (e.g., `YYYY-MM-DD.log`).
 
 Log entries include:
-- Request identifiers for tracing
+- Request identifiers (UUID) for tracing
 - Timestamps in ISO 8601 format
-- Request/response details
-- Error messages and stack traces (in debug mode)
+- Complete request details (method, path, headers, body, IP address)
+- JSON decoded payload (if valid JSON)
+- Sensitive data automatically masked (tokens, credentials)
+- Large bodies (>1MB) saved to separate files in `large-bodies/` subdirectory
 
 ## Contributing
 

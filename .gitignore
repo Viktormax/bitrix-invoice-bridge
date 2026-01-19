@@ -12,7 +12,7 @@ keys/
 # Dependencies
 /vendor/
 composer.phar
-composer.lock
+# composer.lock is committed for reproducible builds in production
 
 # Logs & runtime
 logs/

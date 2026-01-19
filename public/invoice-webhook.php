@@ -88,7 +88,7 @@ try {
         exit;
     }
 
-    if (empty($authToken) || $authToken !== $expectedToken) {
+    if (empty($authToken) || !hash_equals($expectedToken, $authToken)) {
         http_response_code(401);
         $response['error'] = 'Unauthorized: invalid or missing api-auth-token header';
         header('Content-Type: application/json');
