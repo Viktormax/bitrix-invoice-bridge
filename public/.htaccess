@@ -1,0 +1,61 @@
+# Apache configuration for SiteGround hosting
+# Redirect all requests to index.php or specific endpoints
+
+# Enable rewrite engine
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /
+    
+    # Allow direct access to PHP files
+    RewriteCond %{REQUEST_FILENAME} -f
+    RewriteRule ^ - [L]
+    
+    # Deny access to hidden files
+    RewriteRule ^\. - [F,L]
+</IfModule>
+
+# Security headers
+<IfModule mod_headers.c>
+    # Prevent clickjacking
+    Header set X-Frame-Options "SAMEORIGIN"
+    
+    # XSS protection
+    Header set X-XSS-Protection "1; mode=block"
+    
+    # Prevent MIME type sniffing
+    Header set X-Content-Type-Options "nosniff"
+</IfModule>
+
+# PHP settings
+<IfModule mod_php7.c>
+    php_value upload_max_filesize 10M
+    php_value post_max_size 10M
+    php_value max_execution_time 30
+    php_value max_input_time 30
+</IfModule>
+
+# Deny access to sensitive files
+<FilesMatch "\.(env|log|ini|conf|key|pem|p12|sql|bak|backup)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Additional protection for .env files (Apache 2.4+)
+<IfModule mod_authz_core.c>
+    <FilesMatch "^\.env">
+        Require all denied
+    </FilesMatch>
+    <FilesMatch "\.env$">
+        Require all denied
+    </FilesMatch>
+</IfModule>
+
+# Block access to parent directory traversal attempts
+<IfModule mod_rewrite.c>
+    RewriteCond %{REQUEST_URI} \.\./
+    RewriteRule ^ - [F,L]
+    
+    # Block direct access to .env
+    RewriteRule ^\.env - [F,L]
+    RewriteRule ^\.env\. - [F,L]
+</IfModule>

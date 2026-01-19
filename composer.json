@@ -1,0 +1,28 @@
+{
+    "name": "bitrix-invoice-bridge/bitrix-invoice-bridge",
+    "description": "Bidirectional bridge between InVoice (Enel Campaign Orchestrator) and Bitrix24",
+    "type": "project",
+    "require": {
+        "php": ">=7.4",
+        "vlucas/phpdotenv": "^5.5",
+        "ramsey/uuid": "^4.7",
+        "phpseclib/phpseclib": "^3.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.5|^10.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "BitrixInvoiceBridge\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "BitrixInvoiceBridge\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    }
+}

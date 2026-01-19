@@ -1,6 +1,7 @@
 # Environment & secrets
 .env
 .env.*
+!.env.example
 secrets/
 certs/
 keys/
@@ -10,12 +11,21 @@ keys/
 
 # Dependencies
 /vendor/
+composer.phar
+composer.lock
 
 # Logs & runtime
 logs/
 *.log
+storage/logs/
+storage/logs/**/*.json
+storage/logs/**/*.log
 tmp/
 cache/
+
+# Token cache files (contain sensitive access tokens)
+storage/logs/invoice_token_cache_*.json
+**/invoice_token_cache_*.json
 
 # Local tooling
 .vscode/
@@ -24,3 +34,12 @@ cache/
 
 # Tests / QA
 .phpunit.result.cache
+.phpunit.cache/
+tests/_output/
+tests/coverage/
+
+# Manual/exploratory tests (not for production, not committed)
+tests-manual/
+
+# Documentation (internal, not for public repo)
+Documentazione/

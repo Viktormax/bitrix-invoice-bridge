@@ -1,0 +1,9 @@
+# Deny all access to src directory
+# Source code should never be accessible via web
+
+Order allow,deny
+Deny from all
+
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>

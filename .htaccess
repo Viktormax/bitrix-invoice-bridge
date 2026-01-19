@@ -1,0 +1,46 @@
+# Root .htaccess - Deny access to sensitive files and directories
+# This protects files in the root directory from web access
+
+# Deny access to .env files (all variations)
+<FilesMatch "^\.env">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Deny access to .env.* files
+<FilesMatch "^\.env\.">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Deny access to sensitive directories
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    
+    # Block access to .env files
+    RewriteRule ^\.env - [F,L]
+    RewriteRule ^\.env\. - [F,L]
+    
+    # Block access to sensitive directories
+    RewriteRule ^(vendor|src|storage|secrets|certs|keys)/ - [F,L]
+    
+    # Block access to configuration files
+    RewriteRule ^(composer\.(json|lock)|\.git|\.gitignore|\.gitattributes) - [F,L]
+</IfModule>
+
+# Additional protection for Apache 2.4+
+<IfModule mod_authz_core.c>
+    <FilesMatch "^\.env">
+        Require all denied
+    </FilesMatch>
+    
+    <FilesMatch "^\.env\.">
+        Require all denied
+    </FilesMatch>
+</IfModule>
+
+# Deny access to sensitive file types
+<FilesMatch "\.(env|log|ini|conf|key|pem|p12|sql|bak|backup)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
