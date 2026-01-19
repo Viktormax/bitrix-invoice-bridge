@@ -1,0 +1,26 @@
+# Environment & secrets
+.env
+.env.*
+secrets/
+certs/
+keys/
+*.pem
+*.key
+*.p12
+
+# Dependencies
+/vendor/
+
+# Logs & runtime
+logs/
+*.log
+tmp/
+cache/
+
+# Local tooling
+.vscode/
+.idea/
+.DS_Store
+
+# Tests / QA
+.phpunit.result.cache
