@@ -110,7 +110,7 @@ class Bitrix24ApiClientTest extends TestCase
         $lotId = 280027;
         $campaignId = 65704;
         
-        $fields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, $lotId, $campaignId, 'lead');
+        $fields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, $lotId, $campaignId, null, 'lead');
         
         $this->assertArrayHasKey('TITLE', $fields);
         $this->assertStringContainsString('Lead from InVoice', $fields['TITLE']);
@@ -151,7 +151,7 @@ class Bitrix24ApiClientTest extends TestCase
         $lotId = 280066;
         $campaignId = 138663;
         
-        $fields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, $lotId, $campaignId, 'contact');
+        $fields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, $lotId, $campaignId, null, 'contact');
         
         $this->assertArrayHasKey('NAME', $fields);
         $this->assertStringContainsString('Contact from InVoice', $fields['NAME']);
@@ -180,7 +180,7 @@ class Bitrix24ApiClientTest extends TestCase
             ]
         ];
         
-        $fields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, 12345, null, 'lead');
+        $fields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, 12345, null, null, 'lead');
         
         $this->assertArrayNotHasKey('SOURCE_DESCRIPTION', $fields);
         $this->assertArrayHasKey('PHONE', $fields);
@@ -197,7 +197,7 @@ class Bitrix24ApiClientTest extends TestCase
             ]
         ];
         
-        $fields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, 12345, null, 'lead');
+        $fields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, 12345, null, null, 'lead');
         
         $this->assertArrayHasKey('UF_CRM_DATA_SCADENZA', $fields);
         $this->assertEquals('invalid-date', $fields['UF_CRM_DATA_SCADENZA']);
@@ -218,7 +218,7 @@ class Bitrix24ApiClientTest extends TestCase
         $campaignId = 65704;
         $pipelineId = 5;
         
-        $fields = Bitrix24ApiClient::mapInvoiceDataToDealFields($lotData, $lotId, $campaignId, $pipelineId);
+        $fields = Bitrix24ApiClient::mapInvoiceDataToDealFields($lotData, $lotId, $campaignId, null, $pipelineId);
         
         $this->assertArrayHasKey('TITLE', $fields);
         $this->assertStringContainsString('Deal from InVoice', $fields['TITLE']);
@@ -243,7 +243,7 @@ class Bitrix24ApiClientTest extends TestCase
             ]
         ];
         
-        $fields = Bitrix24ApiClient::mapInvoiceDataToDealFields($lotData, 12345, 65704, null);
+        $fields = Bitrix24ApiClient::mapInvoiceDataToDealFields($lotData, 12345, 65704, null, null);
         
         $this->assertArrayNotHasKey('CATEGORY_ID', $fields);
     }
@@ -255,7 +255,7 @@ class Bitrix24ApiClientTest extends TestCase
     {
         $lotData = [[]];
         
-        $fields = Bitrix24ApiClient::mapInvoiceDataToDealFields($lotData, 12345, null, 0);
+        $fields = Bitrix24ApiClient::mapInvoiceDataToDealFields($lotData, 12345, null, null, 0);
         
         $this->assertArrayNotHasKey('CATEGORY_ID', $fields);
     }
@@ -265,7 +265,7 @@ class Bitrix24ApiClientTest extends TestCase
      */
     public function testMapInvoiceDataToBitrixFieldsEmptyData(): void
     {
-        $fields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields([], 12345, null, 'lead');
+        $fields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields([], 12345, null, null, 'lead');
         
         $this->assertArrayHasKey('TITLE', $fields);
         $this->assertArrayNotHasKey('PHONE', $fields);
@@ -277,7 +277,7 @@ class Bitrix24ApiClientTest extends TestCase
      */
     public function testMapInvoiceDataToDealFieldsEmptyData(): void
     {
-        $fields = Bitrix24ApiClient::mapInvoiceDataToDealFields([], 12345, null, null);
+        $fields = Bitrix24ApiClient::mapInvoiceDataToDealFields([], 12345, null, null, null);
         
         $this->assertArrayHasKey('TITLE', $fields);
         $this->assertArrayHasKey('COMMENTS', $fields);

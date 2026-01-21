@@ -500,4 +500,25 @@ class InvoiceApiClient
             'size' => $size,
         ]);
     }
+
+    /**
+     * Upload a single worked contact (Bitrix -> InVoice).
+     *
+     * Endpoint: POST /partner-api/v5/worked
+     * Content-Type: application/json
+     *
+     * Required fields (per API docs):
+     * - workedCode
+     * - workedDate
+     * - workedEndDate
+     * - resultCode
+     * - caller
+     * - workedType
+     * - campaignId
+     * - contactId
+     */
+    public function submitWorkedContact(array $workedPayload): array
+    {
+        return $this->request('POST', '/partner-api/v5/worked', $workedPayload);
+    }
 }

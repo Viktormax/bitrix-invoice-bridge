@@ -21,6 +21,9 @@ This project provides a complete bridge between InVoice (Enel Campaign Orchestra
 - ✅ Configurable duplicate checking
 - ✅ Campaign name mapping from InVoice campaign IDs
 
+**Phase 3 (In Progress)**:
+- 🚧 Reverse flow: Bitrix24 → InVoice worked upload (calls/activities)
+
 ### Key Principles
 
 - **Security**: Token-based authentication, input validation, and secure handling of sensitive data
@@ -110,6 +113,10 @@ The application is configured via environment variables in the `.env` file. See 
 - `PIPELINE`: Pipeline ID for deals (only used when `ENTITY_TYPE=contact`)
   - Set to `0` or leave empty to use default pipeline
   - Example: `PIPELINE=1` for a specific pipeline
+
+#### Bitrix → InVoice (Reverse Flow)
+- `BITRIX_WEBHOOK_TOKEN`: Shared secret token for authenticating Bitrix calls to `public/bitrix-webhook.php` (HTTP header `x-api-auth-token`)
+- `BITRIX_OUT_PIPELINE`: Restrict processing to a specific deal pipeline (Bitrix `CATEGORY_ID`). If empty/0, all pipelines are accepted.
 
 #### Application Configuration
 - `APP_ENV`: Application environment (`production`, `development`, `staging`)
@@ -217,6 +224,7 @@ The following InVoice fields are automatically mapped to Bitrix24:
 
 2. **Access the application**:
    - Webhook endpoints will be available at `http://localhost:8000/invoice-webhook.php`
+   - Bitrix reverse-flow endpoint will be available at `http://localhost:8000/bitrix-webhook.php`
 
 3. **Test the setup**:
    ```bash
@@ -269,6 +277,8 @@ The project includes comprehensive unit tests in the `tests/` directory:
   - Deal field mapping with and without pipeline
   - Date format conversion (DD/MM/YYYY to YYYY-MM-DD)
   - Empty data handling
+- `BitrixToInvoiceWorkedMapperTest`:
+  - Validation and payload building for `POST /partner-api/v5/worked` (no network calls)
 
 ### Utility Scripts
 

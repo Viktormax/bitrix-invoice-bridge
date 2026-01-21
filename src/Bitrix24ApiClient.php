@@ -233,6 +233,31 @@ class Bitrix24ApiClient
     }
 
     /**
+     * Get deal by ID.
+     */
+    public function getDeal(int $dealId): array
+    {
+        return $this->request('crm.deal.get', ['id' => $dealId]);
+    }
+
+    /**
+     * Get contact by ID.
+     */
+    public function getContact(int $contactId): array
+    {
+        return $this->request('crm.contact.get', ['id' => $contactId]);
+    }
+
+    /**
+     * Get CRM activity by ID.
+     * NOTE: The exact payload depends on your Bitrix configuration and event type.
+     */
+    public function getActivity(int $activityId): array
+    {
+        return $this->request('crm.activity.get', ['id' => $activityId]);
+    }
+
+    /**
      * Get campaign name from id_config_campagna.
      * 
      * @param int $idConfigCampagna Campaign configuration ID from InVoice
@@ -268,7 +293,13 @@ class Bitrix24ApiClient
      * @param string $entityType Entity type: 'lead' or 'contact'
      * @return array Bitrix24 fields
      */
-    public static function mapInvoiceDataToBitrixFields(array $lotData, int $lotId, ?int $idConfigCampagna = null, string $entityType = 'lead'): array
+    public static function mapInvoiceDataToBitrixFields(
+        array $lotData,
+        int $lotId,
+        ?int $idConfigCampagna = null,
+        ?int $idCampagna = null,
+        string $entityType = 'lead'
+    ): array
     {
         // Extract first lead from lot (usually lot contains one lead)
         $leadData = $lotData[0] ?? [];
@@ -322,6 +353,16 @@ class Bitrix24ApiClient
         if (isset($leadData['ID_ANAGRAFICA']) && !empty($leadData['ID_ANAGRAFICA'])) {
             $bitrixFields['UF_CRM_INVOICE_ID_ANAGRAFICA'] = (string)$leadData['ID_ANAGRAFICA'];
         }
+
+        // Store InVoice lot and campaign IDs (needed for Bitrix -> InVoice worked upload).
+        // NOTE: These are custom fields and must be created in Bitrix24 before use.
+        $bitrixFields['UF_CRM_INVOICE_LOT_ID'] = (string)$lotId;
+        if ($idCampagna !== null) {
+            $bitrixFields['UF_CRM_INVOICE_CAMPAIGN_ID'] = (string)$idCampagna;
+        }
+        if ($idConfigCampagna !== null) {
+            $bitrixFields['UF_CRM_INVOICE_CAMPAIGN_CONFIG_ID'] = (string)$idConfigCampagna;
+        }
         
         // Store lot ID in comments or custom field
         $comments = "InVoice Lot ID: {$lotId}\n" . 
@@ -345,7 +386,13 @@ class Bitrix24ApiClient
      * @param int|null $pipelineId Pipeline ID for the deal
      * @return array Bitrix24 deal fields
      */
-    public static function mapInvoiceDataToDealFields(array $lotData, int $lotId, ?int $idConfigCampagna = null, ?int $pipelineId = null): array
+    public static function mapInvoiceDataToDealFields(
+        array $lotData,
+        int $lotId,
+        ?int $idConfigCampagna = null,
+        ?int $idCampagna = null,
+        ?int $pipelineId = null
+    ): array
     {
         // Extract first lead from lot
         $leadData = $lotData[0] ?? [];
@@ -369,6 +416,18 @@ class Bitrix24ApiClient
         // Store lot ID in comments
         $dealFields['COMMENTS'] = "InVoice Lot ID: {$lotId}\n" . 
             (isset($leadData['ID_ANAGRAFICA']) ? "ID Anagrafica: {$leadData['ID_ANAGRAFICA']}\n" : '');
+
+        // Store InVoice references on the deal as custom fields as well (recommended).
+        $dealFields['UF_CRM_INVOICE_LOT_ID'] = (string)$lotId;
+        if ($idCampagna !== null) {
+            $dealFields['UF_CRM_INVOICE_CAMPAIGN_ID'] = (string)$idCampagna;
+        }
+        if ($idConfigCampagna !== null) {
+            $dealFields['UF_CRM_INVOICE_CAMPAIGN_CONFIG_ID'] = (string)$idConfigCampagna;
+        }
+        if (isset($leadData['ID_ANAGRAFICA']) && !empty($leadData['ID_ANAGRAFICA'])) {
+            $dealFields['UF_CRM_INVOICE_ID_ANAGRAFICA'] = (string)$leadData['ID_ANAGRAFICA'];
+        }
         
         return $dealFields;
     }
