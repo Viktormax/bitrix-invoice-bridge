@@ -40,14 +40,6 @@ if (!file_exists($autoload)) {
 }
 require $autoload;
 
-// Quick reject non-POST
-if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
-    http_response_code(405);
-    header('Content-Type: application/json');
-    echo json_encode(['ok' => false, 'error' => 'Method Not Allowed']);
-    exit;
-}
-
 $requestId = Uuid::uuid4()->toString();
 header('X-Request-ID: ' . $requestId);
 
@@ -58,35 +50,117 @@ foreach ($headers as $k => $v) {
     $headersLower[strtolower((string)$k)] = $v;
 }
 
+$rawBody = file_get_contents('php://input') ?: '';
+$decoded = null;
+if ($rawBody !== '') {
+    $decoded = json_decode($rawBody, true);
+}
+
+// ---------------------------------------------------------------------
+// LOG ALL REQUESTS (before authentication) - for debugging
+// ---------------------------------------------------------------------
+
+$bitrixWebhookLogFile = __DIR__ . '/../storage/logs/bitrix-webhook-calls.log';
+$logDir = dirname($bitrixWebhookLogFile);
+if (!is_dir($logDir)) {
+    mkdir($logDir, 0755, true);
+}
+
+$logEntry = [
+    'timestamp' => date('Y-m-d H:i:s'),
+    'request_id' => $requestId,
+    'method' => $_SERVER['REQUEST_METHOD'] ?? 'UNKNOWN',
+    'headers' => $headers,
+    'raw_body' => $rawBody,
+    'json_decoded' => $decoded,
+    'json_error' => (json_last_error() === JSON_ERROR_NONE) ? null : json_last_error_msg(),
+    'query_string' => $_SERVER['QUERY_STRING'] ?? '',
+    'remote_ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+    'x_real_ip' => $headersLower['x-real-ip'] ?? null,
+    'x_forwarded_for' => $headersLower['x-forwarded-for'] ?? null,
+    'server_vars' => [
+        'REQUEST_URI' => $_SERVER['REQUEST_URI'] ?? null,
+        'HTTP_HOST' => $_SERVER['HTTP_HOST'] ?? null,
+        'HTTPS' => $_SERVER['HTTPS'] ?? null,
+        'REQUEST_METHOD' => $_SERVER['REQUEST_METHOD'] ?? null,
+    ],
+    'auth_status' => 'not_checked_yet',
+];
+
+$logLine = json_encode($logEntry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n";
+
+// Write to dedicated log file (append mode, with locking)
+@file_put_contents($bitrixWebhookLogFile, $logLine, FILE_APPEND | LOCK_EX);
+error_log("BitrixWebhook [{$requestId}]: ALL requests logged to bitrix-webhook-calls.log (before auth check)");
+
+// Quick reject non-POST
+if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+    // Log rejection
+    $rejectLog = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'request_id' => $requestId,
+        'rejection_reason' => 'Method Not Allowed (not POST)',
+        'method' => $_SERVER['REQUEST_METHOD'] ?? 'UNKNOWN',
+    ];
+    @file_put_contents($bitrixWebhookLogFile, "REJECTED: " . json_encode($rejectLog, JSON_PRETTY_PRINT) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+    
+    http_response_code(405);
+    header('Content-Type: application/json');
+    echo json_encode(['ok' => false, 'error' => 'Method Not Allowed', 'request_id' => $requestId]);
+    exit;
+}
+
 // Shared secret auth
 $expected = $_ENV['BITRIX_WEBHOOK_TOKEN'] ?? getenv('BITRIX_WEBHOOK_TOKEN');
 $provided = $headersLower['x-api-auth-token'] ?? null;
+
 if (empty($expected)) {
+    // Log configuration error
+    $errorLog = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'request_id' => $requestId,
+        'error' => 'Server misconfigured: BITRIX_WEBHOOK_TOKEN not set',
+    ];
+    @file_put_contents($bitrixWebhookLogFile, "ERROR: " . json_encode($errorLog, JSON_PRETTY_PRINT) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+    
     http_response_code(500);
     header('Content-Type: application/json');
     echo json_encode(['ok' => false, 'request_id' => $requestId, 'error' => 'Server misconfigured: BITRIX_WEBHOOK_TOKEN not set']);
     exit;
 }
+
 if (!is_string($provided) || !hash_equals((string)$expected, (string)$provided)) {
+    // Log authentication failure
+    $authFailLog = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'request_id' => $requestId,
+        'auth_status' => 'failed',
+        'provided_token_preview' => $provided ? (substr($provided, 0, 6) . '***') : 'null',
+        'expected_token_preview' => substr($expected, 0, 6) . '***',
+    ];
+    @file_put_contents($bitrixWebhookLogFile, "AUTH_FAILED: " . json_encode($authFailLog, JSON_PRETTY_PRINT) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+    
     http_response_code(401);
     header('Content-Type: application/json');
     echo json_encode(['ok' => false, 'request_id' => $requestId, 'error' => 'Unauthorized']);
     exit;
 }
 
-// Logging (forensic)
+// Update log entry with auth success
+$authSuccessLog = [
+    'timestamp' => date('Y-m-d H:i:s'),
+    'request_id' => $requestId,
+    'auth_status' => 'success',
+];
+@file_put_contents($bitrixWebhookLogFile, "AUTH_SUCCESS: " . json_encode($authSuccessLog, JSON_PRETTY_PRINT) . "\n", FILE_APPEND | LOCK_EX);
+
+// Logging (forensic) - only for authenticated requests
 $logDir = $_ENV['LOG_DIR'] ?? getenv('LOG_DIR') ?: (__DIR__ . '/../storage/logs/invoice-webhook');
 try {
     $logger = new WebhookLogger($logDir);
 } catch (\Throwable $e) {
     $logger = null;
     error_log("BitrixWebhook [{$requestId}]: Failed to init logger: " . $e->getMessage());
-}
-
-$rawBody = file_get_contents('php://input') ?: '';
-$decoded = null;
-if ($rawBody !== '') {
-    $decoded = json_decode($rawBody, true);
 }
 
 if ($logger) {
@@ -108,40 +182,6 @@ if ($logger) {
         error_log("BitrixWebhook [{$requestId}]: Failed to write forensic log: " . $e->getMessage());
     }
 }
-
-// ---------------------------------------------------------------------
-// Dedicated log file for studying Bitrix webhook calls
-// ---------------------------------------------------------------------
-
-$bitrixWebhookLogFile = __DIR__ . '/../storage/logs/bitrix-webhook-calls.log';
-$logDir = dirname($bitrixWebhookLogFile);
-if (!is_dir($logDir)) {
-    mkdir($logDir, 0755, true);
-}
-
-$logEntry = [
-    'timestamp' => date('Y-m-d H:i:s'),
-    'request_id' => $requestId,
-    'method' => $_SERVER['REQUEST_METHOD'] ?? 'UNKNOWN',
-    'headers' => $headers,
-    'raw_body' => $rawBody,
-    'json_decoded' => $decoded,
-    'query_string' => $_SERVER['QUERY_STRING'] ?? '',
-    'remote_ip' => $_SERVER['REMOTE_ADDR'] ?? null,
-    'x_real_ip' => $headersLower['x-real-ip'] ?? null,
-    'x_forwarded_for' => $headersLower['x-forwarded-for'] ?? null,
-    'server_vars' => [
-        'REQUEST_URI' => $_SERVER['REQUEST_URI'] ?? null,
-        'HTTP_HOST' => $_SERVER['HTTP_HOST'] ?? null,
-        'HTTPS' => $_SERVER['HTTPS'] ?? null,
-    ],
-];
-
-$logLine = json_encode($logEntry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n";
-
-// Write to dedicated log file (append mode, with locking)
-@file_put_contents($bitrixWebhookLogFile, $logLine, FILE_APPEND | LOCK_EX);
-error_log("BitrixWebhook [{$requestId}]: Call logged to bitrix-webhook-calls.log for analysis");
 
 // ---------------------------------------------------------------------
 // TEMPORARY: Log only, no processing (for studying Bitrix payload format)
