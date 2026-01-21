@@ -521,4 +521,19 @@ class InvoiceApiClient
     {
         return $this->request('POST', '/partner-api/v5/worked', $workedPayload);
     }
+
+    /**
+     * Get result codes for a specific campaign configuration.
+     * 
+     * Endpoint: GET /partner-api/v5/result_codes?id_config_campagna={id_config_campagna}
+     * 
+     * @param int $idConfigCampagna Campaign configuration ID
+     * @return array Result codes with their mappings (workedCode, resultCode, descriptions, etc.)
+     */
+    public function getResultCodes(int $idConfigCampagna): array
+    {
+        return $this->request('GET', '/partner-api/v5/result_codes', [
+            'id_config_campagna' => $idConfigCampagna,
+        ]);
+    }
 }
