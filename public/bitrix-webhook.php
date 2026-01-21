@@ -336,16 +336,188 @@ if ($logger) {
 }
 
 // ---------------------------------------------------------------------
-// TEMPORARY: Log only, no processing (for studying Bitrix payload format)
+// Extract Bitrix API credentials and fetch activity/deal data
 // ---------------------------------------------------------------------
 
 $response = [
     'ok' => true,
     'request_id' => $requestId,
     'received_at' => date('c'),
-    'note' => 'Call logged for analysis. Processing temporarily disabled.',
+    'processed' => false,
 ];
 
+// Dedicated log file for Bitrix data retrieval
+$bitrixDataLogFile = __DIR__ . '/../storage/logs/bitrix-data-retrieval.log';
+$dataLogDir = dirname($bitrixDataLogFile);
+if (!is_dir($dataLogDir)) {
+    mkdir($dataLogDir, 0755, true);
+}
+
+$dataLog = [
+    'timestamp' => date('Y-m-d H:i:s'),
+    'request_id' => $requestId,
+    'step' => 'start',
+];
+
+try {
+    // Extract Bitrix event and activity ID
+    $bitrixEvent = $decoded['event'] ?? null;
+    $activityId = $decoded['data']['FIELDS']['ID'] ?? null;
+    
+    $dataLog['bitrix_event'] = $bitrixEvent;
+    $dataLog['activity_id'] = $activityId;
+    
+    if (empty($bitrixEvent) || empty($activityId)) {
+        $dataLog['error'] = 'Missing event or activity ID in payload';
+        $dataLog['decoded_payload'] = $decoded;
+        @file_put_contents($bitrixDataLogFile, json_encode($dataLog, JSON_PRETTY_PRINT) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+        
+        $response['note'] = 'Missing event or activity ID in payload';
+        http_response_code(200);
+        header('Content-Type: application/json');
+        echo json_encode($response);
+        exit;
+    }
+    
+    // Extract Bitrix API credentials from payload
+    $bitrixDomain = $decoded['auth']['domain'] ?? null;
+    $bitrixClientEndpoint = $decoded['auth']['client_endpoint'] ?? null;
+    $bitrixApplicationToken = $decoded['auth']['application_token'] ?? null;
+    $bitrixMemberId = $decoded['auth']['member_id'] ?? null;
+    
+    $dataLog['bitrix_domain'] = $bitrixDomain;
+    $dataLog['bitrix_client_endpoint'] = $bitrixClientEndpoint;
+    $dataLog['bitrix_member_id'] = $bitrixMemberId;
+    $dataLog['bitrix_token_preview'] = $bitrixApplicationToken ? (substr($bitrixApplicationToken, 0, 6) . '***') : null;
+    
+    if (empty($bitrixClientEndpoint) || empty($bitrixApplicationToken)) {
+        $dataLog['error'] = 'Missing Bitrix API credentials (client_endpoint or application_token)';
+        @file_put_contents($bitrixDataLogFile, json_encode($dataLog, JSON_PRETTY_PRINT) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+        
+        $response['note'] = 'Missing Bitrix API credentials';
+        http_response_code(200);
+        header('Content-Type: application/json');
+        echo json_encode($response);
+        exit;
+    }
+    
+    // Build Bitrix webhook URL
+    // Format: {client_endpoint}{user_id}/{token}/
+    // Standard format: https://domain.bitrix24.it/rest/{user_id}/{token}/
+    // We have: https://domain.bitrix24.it/rest/
+    // We need to append: {user_id}/{token}/
+    // Since we don't have user_id in the payload, we'll try using '1' as default
+    // Alternative: the application_token might already be a full webhook token
+    // Try format: {client_endpoint}1/{token}/
+    $webhookUrl = rtrim($bitrixClientEndpoint, '/') . '/1/' . $bitrixApplicationToken . '/';
+    
+    // Note: If this doesn't work, we might need to try:
+    // - {client_endpoint}{token}/ (if token is already complete)
+    // - Extract user_id from member_id or other fields
+    // - Use a different authentication method
+    
+    $dataLog['step'] = 'building_webhook_url';
+    $dataLog['webhook_url'] = preg_replace('/\/[^\/]+\/[^\/]+\/$/', '/***/***/', $webhookUrl); // Mask token in log
+    
+    // Initialize Bitrix API client
+    $bitrix = new Bitrix24ApiClient($webhookUrl);
+    
+    // Step 1: Get activity details
+    $dataLog['step'] = 'fetching_activity';
+    $activityData = null;
+    try {
+        $activityResponse = $bitrix->getActivity((int)$activityId);
+        $activityData = $activityResponse['result'] ?? null;
+        $dataLog['activity_fetch_success'] = true;
+        $dataLog['activity_data'] = $activityData;
+    } catch (\Exception $e) {
+        $dataLog['activity_fetch_error'] = $e->getMessage();
+        $dataLog['activity_fetch_success'] = false;
+        error_log("BitrixWebhook [{$requestId}]: Failed to fetch activity {$activityId}: " . $e->getMessage());
+    }
+    
+    // Extract deal ID from activity
+    $dealId = null;
+    if ($activityData && isset($activityData['OWNER_TYPE_ID'], $activityData['OWNER_ID'])) {
+        // OWNER_TYPE_ID: 1=Contact, 2=Deal, 3=Company, 4=Lead
+        if ((int)$activityData['OWNER_TYPE_ID'] === 2) {
+            $dealId = (int)$activityData['OWNER_ID'];
+        }
+    }
+    
+    $dataLog['step'] = 'extracted_deal_id';
+    $dataLog['deal_id'] = $dealId;
+    $dataLog['activity_owner_type_id'] = $activityData['OWNER_TYPE_ID'] ?? null;
+    $dataLog['activity_owner_id'] = $activityData['OWNER_ID'] ?? null;
+    
+    // Step 2: Get deal details (including custom fields)
+    $dealData = null;
+    if ($dealId) {
+        $dataLog['step'] = 'fetching_deal';
+        try {
+            $dealResponse = $bitrix->getDeal($dealId);
+            $dealData = $dealResponse['result'] ?? null;
+            $dataLog['deal_fetch_success'] = true;
+            
+            // Extract custom fields (all fields that start with UF_CRM_)
+            $customFields = [];
+            if (is_array($dealData)) {
+                foreach ($dealData as $key => $value) {
+                    if (strpos($key, 'UF_CRM_') === 0) {
+                        $customFields[$key] = $value;
+                    }
+                }
+            }
+            $dataLog['deal_custom_fields'] = $customFields;
+            
+            // Extract InVoice-specific custom fields using config
+            $fieldConfig = Bitrix24ApiClient::getBitrixFieldConfig();
+            $invoiceFields = [
+                'id_anagrafica' => $dealData[$fieldConfig['id_anagrafica'] ?? 'UF_CRM_INVOICE_ID_ANAGRAFICA'] ?? null,
+                'id_campagna' => $dealData[$fieldConfig['id_campagna'] ?? 'UF_CRM_INVOICE_CAMPAIGN_ID'] ?? null,
+                'id_config_campagna' => $dealData[$fieldConfig['id_config_campagna'] ?? 'UF_CRM_INVOICE_CAMPAIGN_CONFIG_ID'] ?? null,
+                'data_inizio' => $dealData[$fieldConfig['data_inizio'] ?? 'UF_CRM_INVOICE_DATA_INIZIO'] ?? null,
+                'data_fine' => $dealData[$fieldConfig['data_fine'] ?? 'UF_CRM_INVOICE_DATA_FINE'] ?? null,
+            ];
+            $dataLog['invoice_fields'] = $invoiceFields;
+            
+            // Extract deal category (pipeline)
+            $dataLog['deal_category_id'] = $dealData['CATEGORY_ID'] ?? null;
+            $dataLog['deal_title'] = $dealData['TITLE'] ?? null;
+            $dataLog['deal_stage_id'] = $dealData['STAGE_ID'] ?? null;
+            
+            // Extract activity outcome/result
+            $dataLog['activity_result'] = $activityData['RESULT'] ?? null;
+            $dataLog['activity_subject'] = $activityData['SUBJECT'] ?? null;
+            $dataLog['activity_type_id'] = $activityData['TYPE_ID'] ?? null;
+            $dataLog['activity_direction'] = $activityData['DIRECTION'] ?? null;
+            $dataLog['activity_status'] = $activityData['STATUS'] ?? null;
+            
+        } catch (\Exception $e) {
+            $dataLog['deal_fetch_error'] = $e->getMessage();
+            $dataLog['deal_fetch_success'] = false;
+            error_log("BitrixWebhook [{$requestId}]: Failed to fetch deal {$dealId}: " . $e->getMessage());
+        }
+    } else {
+        $dataLog['note'] = 'No deal ID found in activity (activity is not linked to a deal)';
+    }
+    
+    $dataLog['step'] = 'completed';
+    $dataLog['success'] = true;
+    
+} catch (\Exception $e) {
+    $dataLog['step'] = 'error';
+    $dataLog['error'] = $e->getMessage();
+    $dataLog['trace'] = $e->getTraceAsString();
+    $dataLog['success'] = false;
+    error_log("BitrixWebhook [{$requestId}]: Error processing: " . $e->getMessage());
+}
+
+// Write data log
+@file_put_contents($bitrixDataLogFile, json_encode($dataLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+
+$response['note'] = 'Data retrieved and logged. Check bitrix-data-retrieval.log for details.';
+$response['processed'] = true;
 http_response_code(200);
 header('Content-Type: application/json');
 echo json_encode($response);
