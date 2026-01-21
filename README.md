@@ -20,6 +20,14 @@ This project provides a complete bridge between InVoice (Enel Campaign Orchestra
 - ✅ Support for both leads and contacts with linked deals
 - ✅ Configurable duplicate checking
 - ✅ Campaign name mapping from InVoice campaign IDs
+- ✅ Custom fields configuration for reverse flow (InVoice references stored on Bitrix deals)
+
+**Phase 3 (Implemented)**:
+- ✅ Reverse flow: Bitrix24 → InVoice worked upload
+- ✅ Webhook endpoint for Bitrix24 automation (`public/bitrix-webhook.php`)
+- ✅ Custom fields mapping configuration (`config/bitrix_fields.php`)
+- ✅ Automatic storage of InVoice references (ID_ANAGRAFICA, id_campagna, creation_date, DATA_SCADENZA) on Bitrix deals
+- ✅ Pipeline filtering for reverse flow processing
 
 **Phase 3 (In Progress)**:
 - 🚧 Reverse flow: Bitrix24 → InVoice worked upload (calls/activities)
@@ -46,7 +54,9 @@ This project provides a complete bridge between InVoice (Enel Campaign Orchestra
 ├── src/                 # Application source code
 ├── config/              # Configuration files
 │   ├── campaigns.php   # Campaign ID to name mapping (not committed, copy from example)
-│   └── campaigns.example.php  # Example campaign mapping template
+│   ├── campaigns.example.php  # Example campaign mapping template
+│   ├── bitrix_fields.php  # Bitrix24 custom field IDs mapping (not committed, copy from example)
+│   └── bitrix_fields.example.php  # Example custom fields mapping template
 ├── storage/             # Runtime storage (logs, cache, etc.)
 │   └── logs/           # Application logs
 ├── scripts/             # Utility scripts (webhook testing, etc.)
@@ -199,19 +209,106 @@ return [
 
 **Note**: The `config/campaigns.php` file is ignored by Git (see `.gitignore`). Use `config/campaigns.example.php` as a template.
 
-### Field Mapping
+### Custom Fields Configuration
+
+The reverse flow (Bitrix → InVoice) requires **four custom fields** to be created in Bitrix24 on the **Deal** entity. These fields store InVoice references needed to upload "worked" contacts back to InVoice.
+
+#### Required Custom Fields
+
+| Field Name | Type | Purpose | Example Field ID |
+|------------|------|---------|------------------|
+| **Id Anagrafica Invoice** | Double | Stores InVoice `ID_ANAGRAFICA` | `UF_CRM_1762455213` |
+| **Id Campagna Invoice** | String | Stores InVoice `id_campagna` | `UF_CRM_1768978874430` |
+| **Data Inizio Invoice** | DateTime | Stores InVoice `creation_date` from slice | `UF_CRM_1762868578` |
+| **Data Fine Invoice** | DateTime | Stores InVoice `DATA_SCADENZA` (converted) | `UF_CRM_1762868603` |
+
+#### Configuration File: `config/bitrix_fields.php`
+
+This file maps the custom field names to their actual Bitrix24 field IDs. The file is **not** committed to the repository for security and customization reasons.
+
+**To configure**:
+1. Copy `config/bitrix_fields.example.php` to `config/bitrix_fields.php`
+2. Edit `config/bitrix_fields.php` and update with your actual field IDs:
+
+```php
+<?php
+return [
+    'id_anagrafica' => 'UF_CRM_1762455213',      // Your actual field ID
+    'id_campagna' => 'UF_CRM_1768978874430',     // Your actual field ID
+    'data_inizio' => 'UF_CRM_1762868578',        // Your actual field ID
+    'data_fine' => 'UF_CRM_1762868603',          // Your actual field ID
+];
+```
+
+**To find your custom field IDs in Bitrix24**:
+1. Go to **Settings > CRM > Custom Fields**
+2. Find the field and check its **"CODE"** (e.g., `UF_CRM_1762455213`)
+
+**Note**: The `config/bitrix_fields.php` file is ignored by Git (see `.gitignore`). Use `config/bitrix_fields.example.php` as a template.
+
+### Field Mapping (InVoice → Bitrix24)
 
 The following InVoice fields are automatically mapped to Bitrix24:
 
 | InVoice Field | Bitrix24 Field | Notes |
 |--------------|----------------|-------|
 | `TELEFONO` | `PHONE` | Phone number array with VALUE and VALUE_TYPE |
-| `ID_ANAGRAFICA` | `UF_CRM_INVOICE_ID_ANAGRAFICA` | Custom field (create in Bitrix24 first) |
-| `DATA_SCADENZA` | `UF_CRM_DATA_SCADENZA` | Custom field, converted from DD/MM/YYYY to YYYY-MM-DD |
+| `ID_ANAGRAFICA` | Custom field (Double) | Mapped via `config/bitrix_fields.php` → `id_anagrafica` |
+| `id_campagna` | Custom field (String) | Mapped via `config/bitrix_fields.php` → `id_campagna` |
+| `creation_date` | Custom field (DateTime) | Mapped via `config/bitrix_fields.php` → `data_inizio` |
+| `DATA_SCADENZA` | Custom field (DateTime) | Mapped via `config/bitrix_fields.php` → `data_fine`, converted from DD/MM/YYYY to YYYY-MM-DD 00:00:00 |
 | `id_config_campagna` | `SOURCE_DESCRIPTION` | Mapped via `config/campaigns.php` |
 | Lot ID | `COMMENTS` | Stored in comments field |
 
-**Note**: Custom fields (`UF_CRM_*`) must be created in Bitrix24 before use. See Bitrix24 documentation for creating custom fields.
+**Note**: All custom fields must be created in Bitrix24 before use. See Bitrix24 documentation for creating custom fields.
+
+### Reverse Flow: Bitrix24 → InVoice
+
+The system supports a **reverse flow** where Bitrix24 calls our webhook endpoint (`public/bitrix-webhook.php`) when a call/activity is completed, and we automatically upload a "worked contact" to InVoice.
+
+#### How It Works
+
+1. **Bitrix24 Automation**: Configure a Robot/Business Process/Outgoing Webhook in Bitrix24 that triggers on "Activity updated" or "Activity completed" events
+2. **Webhook Call**: Bitrix24 makes an HTTP POST to `https://yourdomain.com/bitrix-invoice-bridge/public/bitrix-webhook.php` with:
+   - Header: `x-api-auth-token: <BITRIX_WEBHOOK_TOKEN>`
+   - Payload: Deal/Activity information (format varies by Bitrix automation type)
+3. **Processing**: Our webhook:
+   - Validates authentication
+   - Extracts `deal_id` from payload
+   - Fetches deal from Bitrix24 API
+   - Filters by pipeline (if `BITRIX_OUT_PIPELINE` is configured)
+   - Reads InVoice references from custom fields (`id_anagrafica`, `id_campagna`)
+   - Builds "worked" payload and submits to InVoice API (`POST /partner-api/v5/worked`)
+
+#### Configuration
+
+Add to your `.env` file:
+
+```bash
+# Bitrix -> InVoice reverse flow
+BITRIX_WEBHOOK_TOKEN=your-shared-secret-token-here
+BITRIX_OUT_PIPELINE=5  # Optional: only process deals in this pipeline (CATEGORY_ID)
+```
+
+#### Bitrix24 Automation Setup
+
+**Option 1: Outgoing Webhook (Recommended)**
+1. Go to **Settings > CRM > Webhooks**
+2. Create an **Outgoing Webhook**
+3. Set trigger: **"Activity updated"** or **"Activity completed"**
+4. Set URL: `https://yourdomain.com/bitrix-invoice-bridge/public/bitrix-webhook.php`
+5. Add header: `x-api-auth-token: <BITRIX_WEBHOOK_TOKEN>`
+6. Configure payload to include `deal_id` (or let the webhook extract it from activity owner)
+
+**Option 2: Robot/Business Process**
+1. Create a Robot or Business Process
+2. Trigger: **"Activity updated"** or **"Activity completed"**
+3. Action: **"HTTP Request"** (POST)
+4. URL: `https://yourdomain.com/bitrix-invoice-bridge/public/bitrix-webhook.php`
+5. Headers: `x-api-auth-token: <BITRIX_WEBHOOK_TOKEN>`
+6. Body: Include `deal_id` and any additional fields (e.g., `workedCode`, `resultCode`, `workedType`, `caller`, `workedDate`, `workedEndDate`)
+
+**Note**: If `workedCode`, `resultCode`, `workedType`, `caller`, `workedDate`, `workedEndDate` are provided in the payload, they will be used directly. Otherwise, the webhook will use default values or require additional mapping configuration.
 
 ## Local Development
 

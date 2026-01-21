@@ -285,11 +285,46 @@ class Bitrix24ApiClient
     }
 
     /**
+     * Get Bitrix24 custom field configuration.
+     * 
+     * Loads custom field IDs from config/bitrix_fields.php (or .example.php as fallback).
+     * These fields are required for the reverse flow (Bitrix -> InVoice).
+     * 
+     * @return array Custom field IDs mapping (keys: id_anagrafica, id_campagna, data_inizio, data_fine)
+     */
+    public static function getBitrixFieldConfig(): array
+    {
+        static $fieldConfig = null;
+        
+        if ($fieldConfig === null) {
+            $configFile = __DIR__ . '/../config/bitrix_fields.php';
+            $exampleFile = __DIR__ . '/../config/bitrix_fields.example.php';
+            
+            // Try actual config first, then example
+            if (file_exists($configFile)) {
+                $fieldConfig = require $configFile;
+            } elseif (file_exists($exampleFile)) {
+                $fieldConfig = require $exampleFile;
+            } else {
+                $fieldConfig = [];
+            }
+            
+            if (!is_array($fieldConfig)) {
+                $fieldConfig = [];
+            }
+        }
+        
+        return $fieldConfig;
+    }
+
+    /**
      * Map InVoice lot data to Bitrix24 lead/contact fields.
      * 
      * @param array $lotData InVoice lot data (from API response)
      * @param int $lotId InVoice lot ID
      * @param int|null $idConfigCampagna Campaign configuration ID (from event payload)
+     * @param int|null $idCampagna Campaign ID (from event payload)
+     * @param string|null $creationDate Creation date from slice (format: YYYY-MM-DD HH:mm:ss)
      * @param string $entityType Entity type: 'lead' or 'contact'
      * @return array Bitrix24 fields
      */
@@ -298,6 +333,7 @@ class Bitrix24ApiClient
         int $lotId,
         ?int $idConfigCampagna = null,
         ?int $idCampagna = null,
+        ?string $creationDate = null,
         string $entityType = 'lead'
     ): array
     {
@@ -349,17 +385,54 @@ class Bitrix24ApiClient
             }
         }
         
-        // Store InVoice ID_ANAGRAFICA in custom field (if available)
+        // Load custom field configuration
+        $fieldConfig = self::getBitrixFieldConfig();
+        
+        // Store InVoice ID_ANAGRAFICA in custom field (Double field)
         if (isset($leadData['ID_ANAGRAFICA']) && !empty($leadData['ID_ANAGRAFICA'])) {
+            $fieldId = $fieldConfig['id_anagrafica'] ?? null;
+            if ($fieldId) {
+                $bitrixFields[$fieldId] = (float)$leadData['ID_ANAGRAFICA']; // Double field
+            }
+            // Also keep legacy field for backward compatibility
             $bitrixFields['UF_CRM_INVOICE_ID_ANAGRAFICA'] = (string)$leadData['ID_ANAGRAFICA'];
         }
 
-        // Store InVoice lot and campaign IDs (needed for Bitrix -> InVoice worked upload).
-        // NOTE: These are custom fields and must be created in Bitrix24 before use.
-        $bitrixFields['UF_CRM_INVOICE_LOT_ID'] = (string)$lotId;
+        // Store InVoice Campaign ID in custom field (String field)
         if ($idCampagna !== null) {
+            $fieldId = $fieldConfig['id_campagna'] ?? null;
+            if ($fieldId) {
+                $bitrixFields[$fieldId] = (string)$idCampagna; // String field
+            }
+            // Also keep legacy field for backward compatibility
             $bitrixFields['UF_CRM_INVOICE_CAMPAIGN_ID'] = (string)$idCampagna;
         }
+
+        // Store InVoice Start Date (creation_date) in custom field (DateTime field)
+        if ($creationDate !== null && !empty($creationDate)) {
+            $fieldId = $fieldConfig['data_inizio'] ?? null;
+            if ($fieldId) {
+                // Convert to Bitrix DateTime format (YYYY-MM-DD HH:mm:ss)
+                $bitrixFields[$fieldId] = $creationDate;
+            }
+        }
+
+        // Store InVoice End Date (DATA_SCADENZA) in custom field (DateTime field)
+        if (isset($leadData['DATA_SCADENZA']) && !empty($leadData['DATA_SCADENZA'])) {
+            $fieldId = $fieldConfig['data_fine'] ?? null;
+            if ($fieldId) {
+                // Convert from DD/MM/YYYY to YYYY-MM-DD 00:00:00
+                $dateParts = explode('/', $leadData['DATA_SCADENZA']);
+                if (count($dateParts) === 3) {
+                    $bitrixFields[$fieldId] = $dateParts[2] . '-' . $dateParts[1] . '-' . $dateParts[0] . ' 00:00:00';
+                } else {
+                    $bitrixFields[$fieldId] = $leadData['DATA_SCADENZA'];
+                }
+            }
+        }
+
+        // Store InVoice lot and campaign config IDs (legacy, for backward compatibility)
+        $bitrixFields['UF_CRM_INVOICE_LOT_ID'] = (string)$lotId;
         if ($idConfigCampagna !== null) {
             $bitrixFields['UF_CRM_INVOICE_CAMPAIGN_CONFIG_ID'] = (string)$idConfigCampagna;
         }
@@ -383,6 +456,8 @@ class Bitrix24ApiClient
      * @param array $lotData InVoice lot data (from API response)
      * @param int $lotId InVoice lot ID
      * @param int|null $idConfigCampagna Campaign configuration ID (from event payload)
+     * @param int|null $idCampagna Campaign ID (from event payload)
+     * @param string|null $creationDate Creation date from slice (format: YYYY-MM-DD HH:mm:ss)
      * @param int|null $pipelineId Pipeline ID for the deal
      * @return array Bitrix24 deal fields
      */
@@ -391,6 +466,7 @@ class Bitrix24ApiClient
         int $lotId,
         ?int $idConfigCampagna = null,
         ?int $idCampagna = null,
+        ?string $creationDate = null,
         ?int $pipelineId = null
     ): array
     {
@@ -417,16 +493,56 @@ class Bitrix24ApiClient
         $dealFields['COMMENTS'] = "InVoice Lot ID: {$lotId}\n" . 
             (isset($leadData['ID_ANAGRAFICA']) ? "ID Anagrafica: {$leadData['ID_ANAGRAFICA']}\n" : '');
 
-        // Store InVoice references on the deal as custom fields as well (recommended).
-        $dealFields['UF_CRM_INVOICE_LOT_ID'] = (string)$lotId;
+        // Load custom field configuration
+        $fieldConfig = self::getBitrixFieldConfig();
+        
+        // Store InVoice ID_ANAGRAFICA in custom field (Double field)
+        if (isset($leadData['ID_ANAGRAFICA']) && !empty($leadData['ID_ANAGRAFICA'])) {
+            $fieldId = $fieldConfig['id_anagrafica'] ?? null;
+            if ($fieldId) {
+                $dealFields[$fieldId] = (float)$leadData['ID_ANAGRAFICA']; // Double field
+            }
+            // Also keep legacy field for backward compatibility
+            $dealFields['UF_CRM_INVOICE_ID_ANAGRAFICA'] = (string)$leadData['ID_ANAGRAFICA'];
+        }
+
+        // Store InVoice Campaign ID in custom field (String field)
         if ($idCampagna !== null) {
+            $fieldId = $fieldConfig['id_campagna'] ?? null;
+            if ($fieldId) {
+                $dealFields[$fieldId] = (string)$idCampagna; // String field
+            }
+            // Also keep legacy field for backward compatibility
             $dealFields['UF_CRM_INVOICE_CAMPAIGN_ID'] = (string)$idCampagna;
         }
+
+        // Store InVoice Start Date (creation_date) in custom field (DateTime field)
+        if ($creationDate !== null && !empty($creationDate)) {
+            $fieldId = $fieldConfig['data_inizio'] ?? null;
+            if ($fieldId) {
+                // Convert to Bitrix DateTime format (YYYY-MM-DD HH:mm:ss)
+                $dealFields[$fieldId] = $creationDate;
+            }
+        }
+
+        // Store InVoice End Date (DATA_SCADENZA) in custom field (DateTime field)
+        if (isset($leadData['DATA_SCADENZA']) && !empty($leadData['DATA_SCADENZA'])) {
+            $fieldId = $fieldConfig['data_fine'] ?? null;
+            if ($fieldId) {
+                // Convert from DD/MM/YYYY to YYYY-MM-DD 00:00:00
+                $dateParts = explode('/', $leadData['DATA_SCADENZA']);
+                if (count($dateParts) === 3) {
+                    $dealFields[$fieldId] = $dateParts[2] . '-' . $dateParts[1] . '-' . $dateParts[0] . ' 00:00:00';
+                } else {
+                    $dealFields[$fieldId] = $leadData['DATA_SCADENZA'];
+                }
+            }
+        }
+
+        // Store InVoice lot and campaign config IDs (legacy, for backward compatibility)
+        $dealFields['UF_CRM_INVOICE_LOT_ID'] = (string)$lotId;
         if ($idConfigCampagna !== null) {
             $dealFields['UF_CRM_INVOICE_CAMPAIGN_CONFIG_ID'] = (string)$idConfigCampagna;
-        }
-        if (isset($leadData['ID_ANAGRAFICA']) && !empty($leadData['ID_ANAGRAFICA'])) {
-            $dealFields['UF_CRM_INVOICE_ID_ANAGRAFICA'] = (string)$leadData['ID_ANAGRAFICA'];
         }
         
         return $dealFields;

@@ -193,18 +193,38 @@ try {
         exit;
     }
 
-    // Read InVoice references (recommended custom fields on deal)
-    $invoiceContactId = $dealFields['UF_CRM_INVOICE_ID_ANAGRAFICA'] ?? null;
-    $invoiceCampaignId = $dealFields['UF_CRM_INVOICE_CAMPAIGN_ID'] ?? null;
+    // Read InVoice references from custom fields (using config)
+    $fieldConfig = Bitrix24ApiClient::getBitrixFieldConfig();
+    $fieldIdAnagrafica = $fieldConfig['id_anagrafica'] ?? 'UF_CRM_INVOICE_ID_ANAGRAFICA'; // Fallback to legacy
+    $fieldIdCampagna = $fieldConfig['id_campagna'] ?? 'UF_CRM_INVOICE_CAMPAIGN_ID'; // Fallback to legacy
+    
+    // Read custom fields (try configured field first, then legacy)
+    $invoiceContactId = null;
+    if (isset($dealFields[$fieldIdAnagrafica])) {
+        $invoiceContactId = $dealFields[$fieldIdAnagrafica];
+    } elseif (isset($dealFields['UF_CRM_INVOICE_ID_ANAGRAFICA'])) {
+        $invoiceContactId = $dealFields['UF_CRM_INVOICE_ID_ANAGRAFICA'];
+    }
+    
+    $invoiceCampaignId = null;
+    if (isset($dealFields[$fieldIdCampagna])) {
+        $invoiceCampaignId = $dealFields[$fieldIdCampagna];
+    } elseif (isset($dealFields['UF_CRM_INVOICE_CAMPAIGN_ID'])) {
+        $invoiceCampaignId = $dealFields['UF_CRM_INVOICE_CAMPAIGN_ID'];
+    }
 
     if (empty($invoiceContactId) || empty($invoiceCampaignId)) {
-        $response['note'] = 'Missing InVoice IDs on deal (UF_CRM_INVOICE_ID_ANAGRAFICA / UF_CRM_INVOICE_CAMPAIGN_ID); skipped.';
+        $response['note'] = 'Missing InVoice IDs on deal (custom fields: ' . $fieldIdAnagrafica . ' / ' . $fieldIdCampagna . '); skipped.';
         $response['deal_id'] = $dealId;
         http_response_code(200);
         header('Content-Type: application/json');
         echo json_encode($response);
         exit;
     }
+    
+    // Convert to appropriate types (Double field may come as float, String as string)
+    $invoiceContactId = (string)$invoiceContactId;
+    $invoiceCampaignId = (string)$invoiceCampaignId;
 
     // TODO: map Bitrix activity outcome -> workedCode/resultCode/workedType/caller.
     // For now we accept explicit fields if provided by the webhook/robot.

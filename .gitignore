@@ -11,6 +11,7 @@ keys/
 
 # Configuration files (user-specific)
 config/campaigns.php
+config/bitrix_fields.php
 
 # Dependencies
 /vendor/

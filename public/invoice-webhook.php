@@ -419,14 +419,19 @@ try {
                                      ", ENTITY_TYPE: {$entityType}" . 
                                      ", PIPELINE: " . ($pipelineId ?? 'NULL'));
                             
-                            // Extract campaign IDs from slice (needed also for Bitrix -> InVoice)
+                            // Extract campaign IDs and creation date from slice (needed for Bitrix custom fields)
                             $idConfigCampagna = isset($slice['id_config_campagna']) ? (int)$slice['id_config_campagna'] : null;
                             $idCampagna = isset($slice['id_campagna']) ? (int)$slice['id_campagna'] : null;
+                            $creationDate = isset($slice['creation_date']) ? $slice['creation_date'] : null;
+                            
                             if ($idConfigCampagna !== null) {
                                 $campaignName = Bitrix24ApiClient::getCampaignName($idConfigCampagna);
                                 error_log("Webhook [{$requestId}]: Campaign ID: {$idConfigCampagna}, Campaign Name: {$campaignName}");
                             } else {
                                 error_log("Webhook [{$requestId}]: No id_config_campagna found in slice");
+                            }
+                            if ($creationDate !== null) {
+                                error_log("Webhook [{$requestId}]: Creation date from slice: {$creationDate}");
                             }
                             
                             if (!empty($bitrixWebhookUrl)) {
@@ -464,7 +469,7 @@ try {
                                     
                                     if ($entityType === 'contact') {
                                         // Create or update contact
-                                        $contactFields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, $lotId, $idConfigCampagna, $idCampagna, 'contact');
+                                        $contactFields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, $lotId, $idConfigCampagna, $idCampagna, $creationDate, 'contact');
                                         error_log("Webhook [{$requestId}]: Contact fields mapped: " . json_encode(array_keys($contactFields)));
                                         
                                         if ($existingEntity) {
@@ -486,7 +491,7 @@ try {
                                         }
                                         
                                         // Create deal and link to contact
-                                        $dealFields = Bitrix24ApiClient::mapInvoiceDataToDealFields($lotData, $lotId, $idConfigCampagna, $idCampagna, $pipelineId);
+                                        $dealFields = Bitrix24ApiClient::mapInvoiceDataToDealFields($lotData, $lotId, $idConfigCampagna, $idCampagna, $creationDate, $pipelineId);
                                         error_log("Webhook [{$requestId}]: Deal fields mapped: " . json_encode(array_keys($dealFields)));
                                         if (isset($dealFields['CATEGORY_ID'])) {
                                             error_log("Webhook [{$requestId}]: Deal CATEGORY_ID (pipeline): " . $dealFields['CATEGORY_ID']);
@@ -513,7 +518,7 @@ try {
                                         
                                     } else {
                                         // Create or update lead (default behavior)
-                                        $leadFields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, $lotId, $idConfigCampagna, $idCampagna, 'lead');
+                                        $leadFields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, $lotId, $idConfigCampagna, $idCampagna, $creationDate, 'lead');
                                         error_log("Webhook [{$requestId}]: Lead fields mapped: " . json_encode(array_keys($leadFields)));
                                         if (isset($leadFields['SOURCE_DESCRIPTION'])) {
                                             error_log("Webhook [{$requestId}]: Lead SOURCE_DESCRIPTION: " . $leadFields['SOURCE_DESCRIPTION']);
