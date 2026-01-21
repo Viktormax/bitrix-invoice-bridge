@@ -110,8 +110,10 @@ class Bitrix24ApiClient
      */
     public function findLeadByPhone(string $phone): ?array
     {
-        // Normalize phone number (remove spaces, dashes, etc.)
-        $normalizedPhone = preg_replace('/[^0-9+]/', '', $phone);
+        // Normalize phone number with prefix if enabled
+        $normalizedPhone = self::normalizePhoneWithPrefix($phone);
+        // Also remove spaces/dashes for Bitrix search (Bitrix may store with formatting)
+        $normalizedPhone = preg_replace('/[^0-9+]/', '', $normalizedPhone);
         
         try {
             $result = $this->request('crm.lead.list', [
@@ -174,8 +176,10 @@ class Bitrix24ApiClient
      */
     public function findContactByPhone(string $phone): ?array
     {
-        // Normalize phone number (remove spaces, dashes, etc.)
-        $normalizedPhone = preg_replace('/[^0-9+]/', '', $phone);
+        // Normalize phone number with prefix if enabled
+        $normalizedPhone = self::normalizePhoneWithPrefix($phone);
+        // Also remove spaces/dashes for Bitrix search (Bitrix may store with formatting)
+        $normalizedPhone = preg_replace('/[^0-9+]/', '', $normalizedPhone);
         
         try {
             $result = $this->request('crm.contact.list', [
@@ -318,6 +322,84 @@ class Bitrix24ApiClient
     }
 
     /**
+     * Normalize phone number with international prefix if needed.
+     * 
+     * If CHECK_PHONE_PREFIX=true and PHONE_PREFIX is set, ensures the phone number
+     * has the international prefix. If not present, adds it. If already present, leaves it as is.
+     * 
+     * Rules:
+     * - Removes leading/trailing whitespace
+     * - If phone already starts with the prefix, returns as is
+     * - If phone starts with "00" followed by country code, converts to "+" format
+     * - If phone starts with country code without prefix, adds the prefix
+     * - If CHECK_PHONE_PREFIX=false or PHONE_PREFIX is empty, returns phone as is
+     * 
+     * @param string $phone Phone number to normalize
+     * @return string Normalized phone number
+     */
+    public static function normalizePhoneWithPrefix(string $phone): string
+    {
+        // Trim whitespace
+        $phone = trim($phone);
+        if (empty($phone)) {
+            return $phone;
+        }
+        
+        // Check if prefix checking is enabled
+        $checkPrefix = $_ENV['CHECK_PHONE_PREFIX'] ?? getenv('CHECK_PHONE_PREFIX');
+        $prefix = $_ENV['PHONE_PREFIX'] ?? getenv('PHONE_PREFIX');
+        
+        // If checking is disabled or prefix not set, return as is
+        if (strtolower($checkPrefix ?: 'false') !== 'true' || empty($prefix)) {
+            return $phone;
+        }
+        
+        // Normalize prefix (ensure it starts with +)
+        $prefix = trim($prefix);
+        if (!empty($prefix) && $prefix[0] !== '+') {
+            $prefix = '+' . $prefix;
+        }
+        
+        // Remove any existing prefix from phone for comparison
+        $phoneWithoutPrefix = $phone;
+        if (strpos($phone, '+') === 0) {
+            // Phone already has + prefix
+            $phoneWithoutPrefix = substr($phone, 1);
+        } elseif (substr($phone, 0, 2) === '00') {
+            // Phone has 00 prefix (international format without +)
+            $phoneWithoutPrefix = substr($phone, 2);
+        }
+        
+        // Extract country code from prefix (e.g., +39 -> 39)
+        $countryCode = ltrim($prefix, '+');
+        
+        // Check if phone already starts with the prefix
+        if (strpos($phone, $prefix) === 0) {
+            // Already has the correct prefix
+            return $phone;
+        }
+        
+        // Check if phone starts with country code (without + or 00)
+        if (strpos($phoneWithoutPrefix, $countryCode) === 0) {
+            // Phone starts with country code, add prefix
+            return $prefix . $phoneWithoutPrefix;
+        }
+        
+        // Check if phone has 00 prefix with country code
+        if (substr($phone, 0, 2) === '00' && strpos(substr($phone, 2), $countryCode) === 0) {
+            // Convert 00 to +
+            return '+' . substr($phone, 2);
+        }
+        
+        // If phone doesn't start with country code, add prefix + country code
+        // Remove any leading 0 (common in Italian numbers)
+        $phoneCleaned = ltrim($phoneWithoutPrefix, '0');
+        
+        // Add prefix + country code
+        return $prefix . $phoneCleaned;
+    }
+
+    /**
      * Map InVoice lot data to Bitrix24 lead/contact fields.
      * 
      * @param array $lotData InVoice lot data (from API response)
@@ -354,11 +436,13 @@ class Bitrix24ApiClient
             ];
         }
         
-        // Map phone number
+        // Map phone number (with prefix normalization if enabled)
         if (isset($leadData['TELEFONO']) && !empty($leadData['TELEFONO'])) {
+            $normalizedPhone = self::normalizePhoneWithPrefix($leadData['TELEFONO']);
+            error_log("Bitrix24ApiClient: Phone normalization - Original: '{$leadData['TELEFONO']}', Normalized: '{$normalizedPhone}'");
             $bitrixFields['PHONE'] = [
                 [
-                    'VALUE' => $leadData['TELEFONO'],
+                    'VALUE' => $normalizedPhone,
                     'VALUE_TYPE' => 'WORK'
                 ]
             ];

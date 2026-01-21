@@ -138,6 +138,12 @@ The application is configured via environment variables in the `.env` file. See 
 
 - `APP_DEBUG`: Enable debug mode (default: `false`)
 - `INVOICE_ACCESS_TOKEN`: Direct access token (if already obtained, skips OAuth2 flow)
+- `CHECK_PHONE_PREFIX`: Enable automatic phone prefix normalization (default: `false`)
+  - If `true`, phone numbers are normalized with the prefix specified in `PHONE_PREFIX`
+  - If `false` or `PHONE_PREFIX` is empty, phone numbers are saved as received
+- `PHONE_PREFIX`: International phone prefix to add (e.g., `+39` for Italy, `+33` for France)
+  - Only used if `CHECK_PHONE_PREFIX=true`
+  - Format: `+39` or `39` (both accepted, `+` will be added automatically if missing)
 
 ## OAuth2 Authentication
 
@@ -300,13 +306,57 @@ This script will display all available `workedCode` and `resultCode` values for 
 
 **Note**: The `config/result_codes.php` file is ignored by Git (see `.gitignore`). Use `config/result_codes.example.php` as a template.
 
+### Phone Number Normalization
+
+The system can automatically normalize phone numbers by adding an international prefix before saving them to Bitrix24.
+
+#### Configuration
+
+Add to your `.env` file:
+
+```bash
+# Enable phone prefix normalization
+CHECK_PHONE_PREFIX=true
+
+# International phone prefix to add (e.g., +39 for Italy)
+PHONE_PREFIX=+39
+```
+
+#### How It Works
+
+- **If `CHECK_PHONE_PREFIX=true` and `PHONE_PREFIX` is set**:
+  - The system checks if the phone number already has the international prefix
+  - If the prefix is already present, the phone number is left unchanged
+  - If the prefix is missing, it is automatically added
+  - Supports multiple formats:
+    - Numbers starting with `+39` → left as is
+    - Numbers starting with `0039` → converted to `+39`
+    - Numbers starting with `39` → converted to `+39`
+    - Numbers starting with `0` → `0` is removed and prefix is added (e.g., `0123456789` → `+39123456789`)
+
+- **If `CHECK_PHONE_PREFIX=false` or `PHONE_PREFIX` is empty**:
+  - Phone numbers are saved exactly as received from InVoice
+  - No normalization is performed
+
+#### Examples
+
+| Input | `CHECK_PHONE_PREFIX=true`, `PHONE_PREFIX=+39` | Output |
+|-------|-----------------------------------------------|--------|
+| `330597037` | ✅ | `+39330597037` |
+| `+39330597037` | ✅ | `+39330597037` (unchanged) |
+| `00339330597037` | ✅ | `+39330597037` (converted) |
+| `39330597037` | ✅ | `+39330597037` |
+| `0330597037` | ✅ | `+39330597037` (leading 0 removed) |
+
+**Note**: Phone normalization is also applied when searching for existing leads/contacts by phone number, ensuring consistent matching.
+
 ### Field Mapping (InVoice → Bitrix24)
 
 The following InVoice fields are automatically mapped to Bitrix24:
 
 | InVoice Field | Bitrix24 Field | Notes |
 |--------------|----------------|-------|
-| `TELEFONO` | `PHONE` | Phone number array with VALUE and VALUE_TYPE |
+| `TELEFONO` | `PHONE` | Phone number array with VALUE and VALUE_TYPE (normalized with prefix if enabled) |
 | `ID_ANAGRAFICA` | Custom field (Double) | Mapped via `config/bitrix_fields.php` → `id_anagrafica` |
 | `id_campagna` | Custom field (String) | Mapped via `config/bitrix_fields.php` → `id_campagna` |
 | `creation_date` | Custom field (DateTime) | Mapped via `config/bitrix_fields.php` → `data_inizio` |
