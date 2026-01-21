@@ -21,6 +21,7 @@ use BitrixInvoiceBridge\Bitrix24ApiClient;
 use BitrixInvoiceBridge\InvoiceApiClient;
 use BitrixInvoiceBridge\WebhookLogger;
 use BitrixInvoiceBridge\BitrixToInvoiceWorkedMapper;
+use Dotenv\Dotenv;
 use Ramsey\Uuid\Uuid;
 
 // ---------------------------------------------------------------------
@@ -39,6 +40,118 @@ if (!file_exists($autoload)) {
     exit;
 }
 require $autoload;
+
+// Load environment variables
+$envFile = __DIR__ . '/../.env';
+if (file_exists($envFile)) {
+    try {
+        // Try to load with dotenv (for simple key=value pairs)
+        $dotenv = Dotenv::createImmutable(__DIR__ . '/..');
+        $dotenv->load();
+    } catch (\Exception $e) {
+        // If dotenv fails (e.g., due to multi-line JSON values), load manually
+        error_log("BitrixWebhook warning: Dotenv failed, loading .env manually: " . $e->getMessage());
+        
+        // Read .env file and parse manually (handles multi-line JSON values)
+        $envContent = file_get_contents($envFile);
+        $lines = explode("\n", $envContent);
+        $currentKey = null;
+        $currentValue = '';
+        $inMultiLine = false;
+        
+        foreach ($lines as $lineNum => $line) {
+            $originalLine = $line;
+            $line = rtrim($line);
+            
+            // Skip empty lines and comments
+            if (empty($line) || (isset($line[0]) && $line[0] === '#')) {
+                if ($inMultiLine) {
+                    $currentValue .= "\n" . $originalLine;
+                }
+                continue;
+            }
+            
+            // Check if this is a new key=value line
+            if (preg_match('/^([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$/', $line, $matches)) {
+                // Save previous key if exists
+                if ($currentKey !== null) {
+                    $finalValue = trim($currentValue);
+                    // Remove surrounding quotes if present
+                    $finalValue = trim($finalValue, '"\'');
+                    $_ENV[$currentKey] = $finalValue;
+                    putenv("{$currentKey}={$finalValue}");
+                }
+                
+                // Start new key
+                $currentKey = $matches[1];
+                $valuePart = $matches[2];
+                
+                // Check if value starts with { or [ (JSON) - might be multi-line
+                $trimmedValue = trim($valuePart);
+                if (!empty($trimmedValue) && 
+                    (($trimmedValue[0] === '{' || $trimmedValue[0] === '[')) && 
+                    (substr($trimmedValue, -1) !== '}' && substr($trimmedValue, -1) !== ']')) {
+                    // Multi-line JSON
+                    $currentValue = $valuePart;
+                    $inMultiLine = true;
+                } else {
+                    // Single line value - remove surrounding quotes
+                    $currentValue = trim($valuePart, '"\'');
+                    // Handle empty values
+                    if ($currentValue === '') {
+                        $currentValue = '';
+                    }
+                    $_ENV[$currentKey] = $currentValue;
+                    putenv("{$currentKey}={$currentValue}");
+                    $currentKey = null;
+                    $currentValue = '';
+                    $inMultiLine = false;
+                }
+            } else if ($inMultiLine && $currentKey !== null) {
+                // Continuation of multi-line value
+                $currentValue .= "\n" . $originalLine;
+                
+                // Check if JSON is complete (balanced braces)
+                $trimmed = trim($currentValue);
+                if (($trimmed[0] === '{' && substr_count($trimmed, '{') === substr_count($trimmed, '}')) ||
+                    ($trimmed[0] === '[' && substr_count($trimmed, '[') === substr_count($trimmed, ']'))) {
+                    // JSON is complete
+                    $finalValue = trim($currentValue);
+                    $_ENV[$currentKey] = $finalValue;
+                    putenv("{$currentKey}={$finalValue}");
+                    $currentKey = null;
+                    $currentValue = '';
+                    $inMultiLine = false;
+                }
+            }
+        }
+        
+        // Save last key if exists
+        if ($currentKey !== null) {
+            $finalValue = trim($currentValue);
+            // Remove surrounding quotes if present
+            $finalValue = trim($finalValue, '"\'');
+            $_ENV[$currentKey] = $finalValue;
+            putenv("{$currentKey}={$finalValue}");
+        }
+    }
+    
+    // Debug: Log loaded environment variables (mask sensitive ones)
+    $loadedVars = [];
+    foreach (['BITRIX_WEBHOOK_TOKEN', 'BITRIX24_WEBHOOK_URL', 'BITRIX_OUT_PIPELINE', 
+              'INVOICE_API_BASE_URL', 'INVOICE_CLIENT_ID'] as $var) {
+        if (isset($_ENV[$var])) {
+            if (in_array($var, ['BITRIX_WEBHOOK_TOKEN', 'BITRIX24_WEBHOOK_URL', 'INVOICE_CLIENT_ID'])) {
+                $loadedVars[$var] = strlen($_ENV[$var]) > 6 ? substr($_ENV[$var], 0, 6) . '***' : '***';
+            } else {
+                $loadedVars[$var] = $_ENV[$var];
+            }
+        }
+    }
+    error_log("BitrixWebhook: Loaded environment variables: " . json_encode($loadedVars, JSON_UNESCAPED_SLASHES));
+} else {
+    error_log("BitrixWebhook warning: .env file not found at {$envFile}. Using environment variables from server.");
+}
 
 $requestId = Uuid::uuid4()->toString();
 header('X-Request-ID: ' . $requestId);
