@@ -281,13 +281,16 @@ if (empty($expected)) {
 }
 
 if (!is_string($provided) || !hash_equals((string)$expected, (string)$provided)) {
-    // Log authentication failure
+    // Log authentication failure with full tokens for debugging
     $authFailLog = [
         'timestamp' => date('Y-m-d H:i:s'),
         'request_id' => $requestId,
         'auth_status' => 'failed',
-        'provided_token_preview' => $provided ? (substr($provided, 0, 6) . '***') : 'null',
-        'expected_token_preview' => substr($expected, 0, 6) . '***',
+        'provided_token' => $provided ?: 'null',
+        'expected_token' => $expected,
+        'provided_token_length' => $provided ? strlen($provided) : 0,
+        'expected_token_length' => strlen($expected),
+        'provided_from' => isset($headersLower['x-api-auth-token']) ? 'header' : (isset($decoded['auth']['application_token']) ? 'body' : 'none'),
     ];
     @file_put_contents($bitrixWebhookLogFile, "AUTH_FAILED: " . json_encode($authFailLog, JSON_PRETTY_PRINT) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
     
