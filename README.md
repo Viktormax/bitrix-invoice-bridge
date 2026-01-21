@@ -127,7 +127,9 @@ The application is configured via environment variables in the `.env` file. See 
   - Example: `PIPELINE=1` for a specific pipeline
 
 #### Bitrix → InVoice (Reverse Flow)
-- `BITRIX_WEBHOOK_TOKEN`: Shared secret token for authenticating Bitrix calls to `public/bitrix-webhook.php` (HTTP header `x-api-auth-token`)
+- `BITRIX_WEBHOOK_TOKEN`: Shared secret token for authenticating Bitrix calls to `public/bitrix-webhook.php`
+  - Can be passed via HTTP header: `x-api-auth-token: <token>` (recommended)
+  - Or via body field: `auth[application_token]: <token>` (Bitrix native format, also supported)
 - `BITRIX_OUT_PIPELINE`: Restrict processing to a specific deal pipeline (Bitrix `CATEGORY_ID`). If empty/0, all pipelines are accepted.
 
 #### Application Configuration
@@ -374,8 +376,13 @@ The system supports a **reverse flow** where Bitrix24 calls our webhook endpoint
 
 1. **Bitrix24 Automation**: Configure a Robot/Business Process/Outgoing Webhook in Bitrix24 that triggers on "Activity updated" or "Activity completed" events
 2. **Webhook Call**: Bitrix24 makes an HTTP POST to `https://yourdomain.com/bitrix-invoice-bridge/public/bitrix-webhook.php` with:
-   - Header: `x-api-auth-token: <BITRIX_WEBHOOK_TOKEN>`
-   - Payload: Deal/Activity information (format varies by Bitrix automation type)
+   - **Authentication** (one of the following):
+     - Header: `x-api-auth-token: <BITRIX_WEBHOOK_TOKEN>` (custom header, recommended)
+     - Body field: `auth[application_token]: <BITRIX_WEBHOOK_TOKEN>` (Bitrix native format, also supported)
+   - **Payload**: Deal/Activity information
+     - Format: `application/x-www-form-urlencoded` (Bitrix native webhook format) or `application/json`
+     - The webhook automatically parses both formats
+     - Common fields: `event`, `data[FIELDS][ID]`, `auth[domain]`, `auth[application_token]`, etc.
 3. **Processing**: Our webhook:
    - Validates authentication
    - Extracts `deal_id` from payload

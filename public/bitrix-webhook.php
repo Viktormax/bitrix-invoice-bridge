@@ -51,9 +51,32 @@ foreach ($headers as $k => $v) {
 }
 
 $rawBody = file_get_contents('php://input') ?: '';
+$contentType = strtolower($headersLower['content-type'] ?? '');
+
+// Parse body based on content type
 $decoded = null;
+$parsedForm = null;
+$jsonError = null;
+
 if ($rawBody !== '') {
-    $decoded = json_decode($rawBody, true);
+    if (strpos($contentType, 'application/json') !== false) {
+        // JSON payload
+        $decoded = json_decode($rawBody, true);
+        $jsonError = (json_last_error() === JSON_ERROR_NONE) ? null : json_last_error_msg();
+    } elseif (strpos($contentType, 'application/x-www-form-urlencoded') !== false || strpos($contentType, 'multipart/form-data') !== false) {
+        // Form-urlencoded payload (Bitrix webhook format)
+        parse_str($rawBody, $parsedForm);
+        $decoded = $parsedForm; // Use same variable for consistency
+    } else {
+        // Try JSON as fallback
+        $decoded = json_decode($rawBody, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $jsonError = json_last_error_msg();
+            // If JSON fails, try form-urlencoded as fallback
+            parse_str($rawBody, $parsedForm);
+            $decoded = $parsedForm;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -71,9 +94,11 @@ $logEntry = [
     'request_id' => $requestId,
     'method' => $_SERVER['REQUEST_METHOD'] ?? 'UNKNOWN',
     'headers' => $headers,
+    'content_type' => $contentType,
     'raw_body' => $rawBody,
-    'json_decoded' => $decoded,
-    'json_error' => (json_last_error() === JSON_ERROR_NONE) ? null : json_last_error_msg(),
+    'parsed_body' => $decoded,
+    'parsed_form' => $parsedForm,
+    'json_error' => $jsonError,
     'query_string' => $_SERVER['QUERY_STRING'] ?? '',
     'remote_ip' => $_SERVER['REMOTE_ADDR'] ?? null,
     'x_real_ip' => $headersLower['x-real-ip'] ?? null,
@@ -85,6 +110,11 @@ $logEntry = [
         'REQUEST_METHOD' => $_SERVER['REQUEST_METHOD'] ?? null,
     ],
     'auth_status' => 'not_checked_yet',
+    // Extract Bitrix-specific fields for easier analysis
+    'bitrix_event' => $decoded['event'] ?? null,
+    'bitrix_activity_id' => $decoded['data']['FIELDS']['ID'] ?? null,
+    'bitrix_auth_domain' => $decoded['auth']['domain'] ?? null,
+    'bitrix_auth_token_preview' => isset($decoded['auth']['application_token']) ? (substr($decoded['auth']['application_token'], 0, 6) . '***') : null,
 ];
 
 $logLine = json_encode($logEntry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n";
@@ -111,8 +141,16 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
 }
 
 // Shared secret auth
+// Bitrix can send auth token either:
+// 1. Via header: x-api-auth-token (custom header)
+// 2. Via body: auth[application_token] (Bitrix native format)
 $expected = $_ENV['BITRIX_WEBHOOK_TOKEN'] ?? getenv('BITRIX_WEBHOOK_TOKEN');
 $provided = $headersLower['x-api-auth-token'] ?? null;
+
+// If not in header, try to get from parsed body (Bitrix format)
+if (empty($provided) && is_array($decoded) && isset($decoded['auth']['application_token'])) {
+    $provided = $decoded['auth']['application_token'];
+}
 
 if (empty($expected)) {
     // Log configuration error
@@ -172,10 +210,11 @@ if ($logger) {
             'query_string' => $_SERVER['QUERY_STRING'] ?? '',
             'headers' => $headers,
             'raw_body' => $rawBody,
-            'json_decoded' => (json_last_error() === JSON_ERROR_NONE) ? $decoded : null,
-            'json_error' => (json_last_error() === JSON_ERROR_NONE) ? null : json_last_error_msg(),
+            'json_decoded' => $decoded,
+            'json_error' => $jsonError,
+            'parsed_form' => $parsedForm,
             'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
-            'content_type' => $_SERVER['CONTENT_TYPE'] ?? null,
+            'content_type' => $contentType,
             'content_length' => $_SERVER['CONTENT_LENGTH'] ?? null,
         ]);
     } catch (\Throwable $e) {
