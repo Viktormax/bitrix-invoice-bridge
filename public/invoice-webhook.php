@@ -472,19 +472,36 @@ try {
                                         $contactFields = Bitrix24ApiClient::mapInvoiceDataToBitrixFields($lotData, $lotId, $idConfigCampagna, $idCampagna, $creationDate, 'contact');
                                         error_log("Webhook [{$requestId}]: Contact fields mapped: " . json_encode(array_keys($contactFields)));
                                         
+                                        // Log custom fields that will be sent to Bitrix
+                                        $fieldConfig = Bitrix24ApiClient::getBitrixFieldConfig();
+                                        $customFieldsToLog = [];
+                                        foreach (['id_anagrafica', 'id_campagna', 'data_inizio', 'data_fine'] as $key) {
+                                            $fieldId = $fieldConfig[$key] ?? null;
+                                            if ($fieldId && isset($contactFields[$fieldId])) {
+                                                $customFieldsToLog[$fieldId] = $contactFields[$fieldId];
+                                            }
+                                        }
+                                        if (!empty($customFieldsToLog)) {
+                                            error_log("Webhook [{$requestId}]: Contact custom fields to send to Bitrix: " . json_encode($customFieldsToLog, JSON_UNESCAPED_SLASHES));
+                                        } else {
+                                            error_log("Webhook [{$requestId}]: WARNING - No custom fields found in contact fields (check bitrix_fields.php config)");
+                                        }
+                                        
                                         if ($existingEntity) {
                                             // Update existing contact
                                             error_log("Webhook [{$requestId}]: Updating existing contact ID " . $existingEntity['ID']);
-                                            $bitrixClient->updateContact((int)$existingEntity['ID'], $contactFields);
+                                            error_log("Webhook [{$requestId}]: Contact fields being sent to Bitrix (including custom fields): " . json_encode($contactFields, JSON_UNESCAPED_SLASHES));
+                                            $contactResult = $bitrixClient->updateContact((int)$existingEntity['ID'], $contactFields);
                                             $bitrixEntityId = $existingEntity['ID'];
-                                            error_log("Webhook [{$requestId}]: Successfully updated contact in Bitrix24");
+                                            error_log("Webhook [{$requestId}]: Successfully updated contact in Bitrix24. Bitrix response: " . json_encode($contactResult, JSON_UNESCAPED_SLASHES));
                                         } else {
                                             // Create new contact
                                             error_log("Webhook [{$requestId}]: Creating new contact in Bitrix24");
+                                            error_log("Webhook [{$requestId}]: Contact fields being sent to Bitrix (including custom fields): " . json_encode($contactFields, JSON_UNESCAPED_SLASHES));
                                             $contactResult = $bitrixClient->createContact($contactFields);
                                             if (isset($contactResult['result'])) {
                                                 $bitrixEntityId = $contactResult['result'];
-                                                error_log("Webhook [{$requestId}]: Successfully created contact in Bitrix24: ID " . $bitrixEntityId);
+                                                error_log("Webhook [{$requestId}]: Successfully created contact in Bitrix24: ID " . $bitrixEntityId . ". Bitrix response: " . json_encode($contactResult, JSON_UNESCAPED_SLASHES));
                                             } else {
                                                 throw new \Exception("Bitrix24 API did not return contact ID: " . json_encode($contactResult));
                                             }
@@ -499,15 +516,48 @@ try {
                                         if (isset($dealFields['SOURCE_DESCRIPTION'])) {
                                             error_log("Webhook [{$requestId}]: Deal SOURCE_DESCRIPTION: " . $dealFields['SOURCE_DESCRIPTION']);
                                         }
+                                        
+                                        // Log custom fields that will be sent to Bitrix
+                                        $fieldConfig = Bitrix24ApiClient::getBitrixFieldConfig();
+                                        $customFieldsToLog = [];
+                                        foreach (['id_anagrafica', 'id_campagna', 'data_inizio', 'data_fine'] as $key) {
+                                            $fieldId = $fieldConfig[$key] ?? null;
+                                            if ($fieldId && isset($dealFields[$fieldId])) {
+                                                $customFieldsToLog[$fieldId] = $dealFields[$fieldId];
+                                            }
+                                        }
+                                        if (!empty($customFieldsToLog)) {
+                                            error_log("Webhook [{$requestId}]: Deal custom fields to send to Bitrix: " . json_encode($customFieldsToLog, JSON_UNESCAPED_SLASHES));
+                                        } else {
+                                            error_log("Webhook [{$requestId}]: WARNING - No custom fields found in deal fields (check bitrix_fields.php config)");
+                                        }
                                         error_log("Webhook [{$requestId}]: Creating deal linked to contact ID " . $bitrixEntityId);
+                                        error_log("Webhook [{$requestId}]: Deal fields being sent to Bitrix (including custom fields): " . json_encode($dealFields, JSON_UNESCAPED_SLASHES));
                                         $dealResult = $bitrixClient->createDeal($dealFields);
                                         if (isset($dealResult['result'])) {
                                             $bitrixDealId = $dealResult['result'];
-                                            error_log("Webhook [{$requestId}]: Successfully created deal: ID " . $bitrixDealId);
+                                            error_log("Webhook [{$requestId}]: Successfully created deal: ID " . $bitrixDealId . ". Bitrix response: " . json_encode($dealResult, JSON_UNESCAPED_SLASHES));
                                             
                                             // Link deal to contact
                                             $bitrixClient->linkDealToContact($bitrixDealId, (int)$bitrixEntityId);
                                             error_log("Webhook [{$requestId}]: Successfully linked deal to contact");
+                                            
+                                            // Verify custom fields were saved by fetching the deal back
+                                            try {
+                                                $verifyDeal = $bitrixClient->getDeal($bitrixDealId);
+                                                $verifyFields = $verifyDeal['result'] ?? [];
+                                                $fieldConfig = Bitrix24ApiClient::getBitrixFieldConfig();
+                                                error_log("Webhook [{$requestId}]: Verifying custom fields on deal {$bitrixDealId}:");
+                                                foreach (['id_anagrafica', 'id_campagna', 'data_inizio', 'data_fine'] as $key) {
+                                                    $fieldId = $fieldConfig[$key] ?? null;
+                                                    if ($fieldId) {
+                                                        $value = $verifyFields[$fieldId] ?? 'NOT FOUND';
+                                                        error_log("Webhook [{$requestId}]:   - {$fieldId} ({$key}): " . (is_array($value) ? json_encode($value) : $value));
+                                                    }
+                                                }
+                                            } catch (\Exception $verifyEx) {
+                                                error_log("Webhook [{$requestId}]: Could not verify custom fields (non-critical): " . $verifyEx->getMessage());
+                                            }
                                         } else {
                                             throw new \Exception("Bitrix24 API did not return deal ID: " . json_encode($dealResult));
                                         }
@@ -524,19 +574,36 @@ try {
                                             error_log("Webhook [{$requestId}]: Lead SOURCE_DESCRIPTION: " . $leadFields['SOURCE_DESCRIPTION']);
                                         }
                                         
+                                        // Log custom fields that will be sent to Bitrix
+                                        $fieldConfig = Bitrix24ApiClient::getBitrixFieldConfig();
+                                        $customFieldsToLog = [];
+                                        foreach (['id_anagrafica', 'id_campagna', 'data_inizio', 'data_fine'] as $key) {
+                                            $fieldId = $fieldConfig[$key] ?? null;
+                                            if ($fieldId && isset($leadFields[$fieldId])) {
+                                                $customFieldsToLog[$fieldId] = $leadFields[$fieldId];
+                                            }
+                                        }
+                                        if (!empty($customFieldsToLog)) {
+                                            error_log("Webhook [{$requestId}]: Lead custom fields to send to Bitrix: " . json_encode($customFieldsToLog, JSON_UNESCAPED_SLASHES));
+                                        } else {
+                                            error_log("Webhook [{$requestId}]: WARNING - No custom fields found in lead fields (check bitrix_fields.php config)");
+                                        }
+                                        
                                         if ($existingEntity) {
                                             // Update existing lead
                                             error_log("Webhook [{$requestId}]: Updating existing lead ID " . $existingEntity['ID']);
-                                            $bitrixClient->updateLead((int)$existingEntity['ID'], $leadFields);
+                                            error_log("Webhook [{$requestId}]: Lead fields being sent to Bitrix (including custom fields): " . json_encode($leadFields, JSON_UNESCAPED_SLASHES));
+                                            $leadResult = $bitrixClient->updateLead((int)$existingEntity['ID'], $leadFields);
                                             $bitrixEntityId = $existingEntity['ID'];
-                                            error_log("Webhook [{$requestId}]: Successfully updated lead in Bitrix24");
+                                            error_log("Webhook [{$requestId}]: Successfully updated lead in Bitrix24. Bitrix response: " . json_encode($leadResult, JSON_UNESCAPED_SLASHES));
                                         } else {
                                             // Create new lead
                                             error_log("Webhook [{$requestId}]: Creating new lead in Bitrix24");
+                                            error_log("Webhook [{$requestId}]: Lead fields being sent to Bitrix (including custom fields): " . json_encode($leadFields, JSON_UNESCAPED_SLASHES));
                                             $leadResult = $bitrixClient->createLead($leadFields);
                                             if (isset($leadResult['result'])) {
                                                 $bitrixEntityId = $leadResult['result'];
-                                                error_log("Webhook [{$requestId}]: Successfully created lead in Bitrix24: ID " . $bitrixEntityId);
+                                                error_log("Webhook [{$requestId}]: Successfully created lead in Bitrix24: ID " . $bitrixEntityId . ". Bitrix response: " . json_encode($leadResult, JSON_UNESCAPED_SLASHES));
                                             } else {
                                                 throw new \Exception("Bitrix24 API did not return lead ID: " . json_encode($leadResult));
                                             }

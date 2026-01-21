@@ -387,25 +387,38 @@ class Bitrix24ApiClient
         
         // Load custom field configuration
         $fieldConfig = self::getBitrixFieldConfig();
+        error_log("Bitrix24ApiClient: Loaded custom field config: " . json_encode($fieldConfig));
         
         // Store InVoice ID_ANAGRAFICA in custom field (Double field)
         if (isset($leadData['ID_ANAGRAFICA']) && !empty($leadData['ID_ANAGRAFICA'])) {
             $fieldId = $fieldConfig['id_anagrafica'] ?? null;
             if ($fieldId) {
-                $bitrixFields[$fieldId] = (float)$leadData['ID_ANAGRAFICA']; // Double field
+                $value = (float)$leadData['ID_ANAGRAFICA'];
+                $bitrixFields[$fieldId] = $value; // Double field
+                error_log("Bitrix24ApiClient: Mapped ID_ANAGRAFICA to custom field {$fieldId} = {$value} (Double)");
+            } else {
+                error_log("Bitrix24ApiClient: WARNING - Custom field 'id_anagrafica' not configured in bitrix_fields.php");
             }
             // Also keep legacy field for backward compatibility
             $bitrixFields['UF_CRM_INVOICE_ID_ANAGRAFICA'] = (string)$leadData['ID_ANAGRAFICA'];
+        } else {
+            error_log("Bitrix24ApiClient: ID_ANAGRAFICA not found in lot data");
         }
 
         // Store InVoice Campaign ID in custom field (String field)
         if ($idCampagna !== null) {
             $fieldId = $fieldConfig['id_campagna'] ?? null;
             if ($fieldId) {
-                $bitrixFields[$fieldId] = (string)$idCampagna; // String field
+                $value = (string)$idCampagna;
+                $bitrixFields[$fieldId] = $value; // String field
+                error_log("Bitrix24ApiClient: Mapped id_campagna to custom field {$fieldId} = {$value} (String)");
+            } else {
+                error_log("Bitrix24ApiClient: WARNING - Custom field 'id_campagna' not configured in bitrix_fields.php");
             }
             // Also keep legacy field for backward compatibility
             $bitrixFields['UF_CRM_INVOICE_CAMPAIGN_ID'] = (string)$idCampagna;
+        } else {
+            error_log("Bitrix24ApiClient: id_campagna not provided (null)");
         }
 
         // Store InVoice Start Date (creation_date) in custom field (DateTime field)
@@ -414,7 +427,12 @@ class Bitrix24ApiClient
             if ($fieldId) {
                 // Convert to Bitrix DateTime format (YYYY-MM-DD HH:mm:ss)
                 $bitrixFields[$fieldId] = $creationDate;
+                error_log("Bitrix24ApiClient: Mapped creation_date to custom field {$fieldId} = {$creationDate} (DateTime)");
+            } else {
+                error_log("Bitrix24ApiClient: WARNING - Custom field 'data_inizio' not configured in bitrix_fields.php");
             }
+        } else {
+            error_log("Bitrix24ApiClient: creation_date not provided (null or empty)");
         }
 
         // Store InVoice End Date (DATA_SCADENZA) in custom field (DateTime field)
@@ -424,11 +442,18 @@ class Bitrix24ApiClient
                 // Convert from DD/MM/YYYY to YYYY-MM-DD 00:00:00
                 $dateParts = explode('/', $leadData['DATA_SCADENZA']);
                 if (count($dateParts) === 3) {
-                    $bitrixFields[$fieldId] = $dateParts[2] . '-' . $dateParts[1] . '-' . $dateParts[0] . ' 00:00:00';
+                    $value = $dateParts[2] . '-' . $dateParts[1] . '-' . $dateParts[0] . ' 00:00:00';
+                    $bitrixFields[$fieldId] = $value;
+                    error_log("Bitrix24ApiClient: Mapped DATA_SCADENZA to custom field {$fieldId} = {$value} (DateTime, converted from {$leadData['DATA_SCADENZA']})");
                 } else {
                     $bitrixFields[$fieldId] = $leadData['DATA_SCADENZA'];
+                    error_log("Bitrix24ApiClient: Mapped DATA_SCADENZA to custom field {$fieldId} = {$leadData['DATA_SCADENZA']} (DateTime, raw value)");
                 }
+            } else {
+                error_log("Bitrix24ApiClient: WARNING - Custom field 'data_fine' not configured in bitrix_fields.php");
             }
+        } else {
+            error_log("Bitrix24ApiClient: DATA_SCADENZA not found in lot data");
         }
 
         // Store InVoice lot and campaign config IDs (legacy, for backward compatibility)
@@ -495,25 +520,38 @@ class Bitrix24ApiClient
 
         // Load custom field configuration
         $fieldConfig = self::getBitrixFieldConfig();
+        error_log("Bitrix24ApiClient: [DEAL] Loaded custom field config: " . json_encode($fieldConfig));
         
         // Store InVoice ID_ANAGRAFICA in custom field (Double field)
         if (isset($leadData['ID_ANAGRAFICA']) && !empty($leadData['ID_ANAGRAFICA'])) {
             $fieldId = $fieldConfig['id_anagrafica'] ?? null;
             if ($fieldId) {
-                $dealFields[$fieldId] = (float)$leadData['ID_ANAGRAFICA']; // Double field
+                $value = (float)$leadData['ID_ANAGRAFICA'];
+                $dealFields[$fieldId] = $value; // Double field
+                error_log("Bitrix24ApiClient: [DEAL] Mapped ID_ANAGRAFICA to custom field {$fieldId} = {$value} (Double)");
+            } else {
+                error_log("Bitrix24ApiClient: [DEAL] WARNING - Custom field 'id_anagrafica' not configured in bitrix_fields.php");
             }
             // Also keep legacy field for backward compatibility
             $dealFields['UF_CRM_INVOICE_ID_ANAGRAFICA'] = (string)$leadData['ID_ANAGRAFICA'];
+        } else {
+            error_log("Bitrix24ApiClient: [DEAL] ID_ANAGRAFICA not found in lot data");
         }
 
         // Store InVoice Campaign ID in custom field (String field)
         if ($idCampagna !== null) {
             $fieldId = $fieldConfig['id_campagna'] ?? null;
             if ($fieldId) {
-                $dealFields[$fieldId] = (string)$idCampagna; // String field
+                $value = (string)$idCampagna;
+                $dealFields[$fieldId] = $value; // String field
+                error_log("Bitrix24ApiClient: [DEAL] Mapped id_campagna to custom field {$fieldId} = {$value} (String)");
+            } else {
+                error_log("Bitrix24ApiClient: [DEAL] WARNING - Custom field 'id_campagna' not configured in bitrix_fields.php");
             }
             // Also keep legacy field for backward compatibility
             $dealFields['UF_CRM_INVOICE_CAMPAIGN_ID'] = (string)$idCampagna;
+        } else {
+            error_log("Bitrix24ApiClient: [DEAL] id_campagna not provided (null)");
         }
 
         // Store InVoice Start Date (creation_date) in custom field (DateTime field)
@@ -522,7 +560,12 @@ class Bitrix24ApiClient
             if ($fieldId) {
                 // Convert to Bitrix DateTime format (YYYY-MM-DD HH:mm:ss)
                 $dealFields[$fieldId] = $creationDate;
+                error_log("Bitrix24ApiClient: [DEAL] Mapped creation_date to custom field {$fieldId} = {$creationDate} (DateTime)");
+            } else {
+                error_log("Bitrix24ApiClient: [DEAL] WARNING - Custom field 'data_inizio' not configured in bitrix_fields.php");
             }
+        } else {
+            error_log("Bitrix24ApiClient: [DEAL] creation_date not provided (null or empty)");
         }
 
         // Store InVoice End Date (DATA_SCADENZA) in custom field (DateTime field)
@@ -532,11 +575,18 @@ class Bitrix24ApiClient
                 // Convert from DD/MM/YYYY to YYYY-MM-DD 00:00:00
                 $dateParts = explode('/', $leadData['DATA_SCADENZA']);
                 if (count($dateParts) === 3) {
-                    $dealFields[$fieldId] = $dateParts[2] . '-' . $dateParts[1] . '-' . $dateParts[0] . ' 00:00:00';
+                    $value = $dateParts[2] . '-' . $dateParts[1] . '-' . $dateParts[0] . ' 00:00:00';
+                    $dealFields[$fieldId] = $value;
+                    error_log("Bitrix24ApiClient: [DEAL] Mapped DATA_SCADENZA to custom field {$fieldId} = {$value} (DateTime, converted from {$leadData['DATA_SCADENZA']})");
                 } else {
                     $dealFields[$fieldId] = $leadData['DATA_SCADENZA'];
+                    error_log("Bitrix24ApiClient: [DEAL] Mapped DATA_SCADENZA to custom field {$fieldId} = {$leadData['DATA_SCADENZA']} (DateTime, raw value)");
                 }
+            } else {
+                error_log("Bitrix24ApiClient: [DEAL] WARNING - Custom field 'data_fine' not configured in bitrix_fields.php");
             }
+        } else {
+            error_log("Bitrix24ApiClient: [DEAL] DATA_SCADENZA not found in lot data");
         }
 
         // Store InVoice lot and campaign config IDs (legacy, for backward compatibility)
