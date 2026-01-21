@@ -110,11 +110,61 @@ if ($logger) {
 }
 
 // ---------------------------------------------------------------------
-// Processing (minimal + safe)
+// Dedicated log file for studying Bitrix webhook calls
+// ---------------------------------------------------------------------
+
+$bitrixWebhookLogFile = __DIR__ . '/../storage/logs/bitrix-webhook-calls.log';
+$logDir = dirname($bitrixWebhookLogFile);
+if (!is_dir($logDir)) {
+    mkdir($logDir, 0755, true);
+}
+
+$logEntry = [
+    'timestamp' => date('Y-m-d H:i:s'),
+    'request_id' => $requestId,
+    'method' => $_SERVER['REQUEST_METHOD'] ?? 'UNKNOWN',
+    'headers' => $headers,
+    'raw_body' => $rawBody,
+    'json_decoded' => $decoded,
+    'query_string' => $_SERVER['QUERY_STRING'] ?? '',
+    'remote_ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+    'x_real_ip' => $headersLower['x-real-ip'] ?? null,
+    'x_forwarded_for' => $headersLower['x-forwarded-for'] ?? null,
+    'server_vars' => [
+        'REQUEST_URI' => $_SERVER['REQUEST_URI'] ?? null,
+        'HTTP_HOST' => $_SERVER['HTTP_HOST'] ?? null,
+        'HTTPS' => $_SERVER['HTTPS'] ?? null,
+    ],
+];
+
+$logLine = json_encode($logEntry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n";
+
+// Write to dedicated log file (append mode, with locking)
+@file_put_contents($bitrixWebhookLogFile, $logLine, FILE_APPEND | LOCK_EX);
+error_log("BitrixWebhook [{$requestId}]: Call logged to bitrix-webhook-calls.log for analysis");
+
+// ---------------------------------------------------------------------
+// TEMPORARY: Log only, no processing (for studying Bitrix payload format)
+// ---------------------------------------------------------------------
+
+$response = [
+    'ok' => true,
+    'request_id' => $requestId,
+    'received_at' => date('c'),
+    'note' => 'Call logged for analysis. Processing temporarily disabled.',
+];
+
+http_response_code(200);
+header('Content-Type: application/json');
+echo json_encode($response);
+exit;
+
+// ---------------------------------------------------------------------
+// Processing (minimal + safe) - DISABLED FOR NOW
 // ---------------------------------------------------------------------
 
 /**
- * Expected processing strategy:
+ * Expected processing strategy (to be enabled after studying logs):
  * - Determine deal ID (and activity ID) from payload
  * - Fetch deal via Bitrix API
  * - Gate by pipeline (CATEGORY_ID)
@@ -124,6 +174,7 @@ if ($logger) {
  * Because Bitrix payload formats vary, this endpoint logs everything and returns 200 quickly.
  */
 
+/*
 $bitrixWebhookUrl = $_ENV['BITRIX24_WEBHOOK_URL'] ?? getenv('BITRIX24_WEBHOOK_URL');
 $pipelineTargetRaw = $_ENV['BITRIX_OUT_PIPELINE'] ?? getenv('BITRIX_OUT_PIPELINE');
 $pipelineTarget = ($pipelineTargetRaw !== null && $pipelineTargetRaw !== '') ? (int)$pipelineTargetRaw : null;
@@ -310,4 +361,4 @@ try {
 http_response_code(200);
 header('Content-Type: application/json');
 echo json_encode($response);
-
+*/

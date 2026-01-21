@@ -27,6 +27,7 @@ public/php_errorlog
 storage/logs/
 storage/logs/**/*.json
 storage/logs/**/*.log
+storage/logs/bitrix-webhook-calls.log
 tmp/
 cache/
 
