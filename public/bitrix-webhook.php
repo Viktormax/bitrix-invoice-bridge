@@ -225,19 +225,63 @@ try {
     // Convert to appropriate types (Double field may come as float, String as string)
     $invoiceContactId = (string)$invoiceContactId;
     $invoiceCampaignId = (string)$invoiceCampaignId;
+    
+    // Read id_config_campagna from deal (needed for result codes mapping)
+    $idConfigCampagna = null;
+    if (isset($dealFields['UF_CRM_INVOICE_CAMPAIGN_CONFIG_ID'])) {
+        $idConfigCampagna = (int)$dealFields['UF_CRM_INVOICE_CAMPAIGN_CONFIG_ID'];
+        error_log("BitrixWebhook [{$requestId}]: Found id_config_campagna on deal: {$idConfigCampagna}");
+    } else {
+        error_log("BitrixWebhook [{$requestId}]: WARNING - id_config_campagna not found on deal, result codes mapping may use default");
+    }
 
-    // TODO: map Bitrix activity outcome -> workedCode/resultCode/workedType/caller.
-    // For now we accept explicit fields if provided by the webhook/robot.
+    // Extract Bitrix activity outcome from payload (supports multiple formats)
+    $bitrixOutcome = null;
+    if (isset($decoded['outcome'])) {
+        $bitrixOutcome = $decoded['outcome'];
+    } elseif (isset($decoded['status'])) {
+        $bitrixOutcome = $decoded['status'];
+    } elseif (isset($decoded['result'])) {
+        $bitrixOutcome = $decoded['result'];
+    } elseif (isset($decoded['data']['FIELDS']['RESULT'])) {
+        $bitrixOutcome = $decoded['data']['FIELDS']['RESULT'];
+    } elseif (isset($decoded['data']['FIELDS']['STATUS'])) {
+        $bitrixOutcome = $decoded['data']['FIELDS']['STATUS'];
+    }
+    
+    if ($bitrixOutcome !== null) {
+        error_log("BitrixWebhook [{$requestId}]: Extracted Bitrix outcome: {$bitrixOutcome}");
+    } else {
+        error_log("BitrixWebhook [{$requestId}]: No Bitrix outcome found in payload, will use explicit workedCode/resultCode if provided");
+    }
+
+    // Build worked input - use outcome mapping if available, otherwise use explicit values
     $workedInput = [
         'contactId' => $invoiceContactId,
         'campaignId' => $invoiceCampaignId,
-        'workedCode' => $decoded['workedCode'] ?? null,
-        'workedDate' => $decoded['workedDate'] ?? null,
-        'workedEndDate' => $decoded['workedEndDate'] ?? null,
-        'resultCode' => $decoded['resultCode'] ?? null,
-        'caller' => $decoded['caller'] ?? null,
-        'workedType' => $decoded['workedType'] ?? null,
+        'workedDate' => $decoded['workedDate'] ?? date('Y-m-d H:i:s'),
+        'workedEndDate' => $decoded['workedEndDate'] ?? date('Y-m-d H:i:s'),
+        'caller' => $decoded['caller'] ?? 'unknown',
     ];
+    
+    // Add outcome mapping if available
+    if ($bitrixOutcome !== null) {
+        $workedInput['bitrixOutcome'] = $bitrixOutcome;
+        if ($idConfigCampagna !== null) {
+            $workedInput['idConfigCampagna'] = $idConfigCampagna;
+        }
+    }
+    
+    // Explicit values override mapping if provided
+    if (isset($decoded['workedCode'])) {
+        $workedInput['workedCode'] = $decoded['workedCode'];
+    }
+    if (isset($decoded['resultCode'])) {
+        $workedInput['resultCode'] = $decoded['resultCode'];
+    }
+    if (isset($decoded['workedType'])) {
+        $workedInput['workedType'] = $decoded['workedType'];
+    }
 
     $workedPayload = BitrixToInvoiceWorkedMapper::buildWorkedPayload($workedInput);
 

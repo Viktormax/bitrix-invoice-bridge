@@ -56,7 +56,9 @@ This project provides a complete bridge between InVoice (Enel Campaign Orchestra
 │   ├── campaigns.php   # Campaign ID to name mapping (not committed, copy from example)
 │   ├── campaigns.example.php  # Example campaign mapping template
 │   ├── bitrix_fields.php  # Bitrix24 custom field IDs mapping (not committed, copy from example)
-│   └── bitrix_fields.example.php  # Example custom fields mapping template
+│   ├── bitrix_fields.example.php  # Example custom fields mapping template
+│   ├── result_codes.php  # Bitrix outcome → InVoice result codes mapping (not committed, copy from example)
+│   └── result_codes.example.php  # Example result codes mapping template
 ├── storage/             # Runtime storage (logs, cache, etc.)
 │   └── logs/           # Application logs
 ├── scripts/             # Utility scripts (webhook testing, etc.)
@@ -246,6 +248,58 @@ return [
 
 **Note**: The `config/bitrix_fields.php` file is ignored by Git (see `.gitignore`). Use `config/bitrix_fields.example.php` as a template.
 
+#### Configuration File: `config/result_codes.php`
+
+This file maps Bitrix24 activity outcomes/statuses to InVoice `workedCode` and `resultCode`. This mapping is required for the reverse flow (Bitrix → InVoice) to automatically translate Bitrix activity results into InVoice worked contact codes.
+
+**To configure**:
+1. Copy `config/result_codes.example.php` to `config/result_codes.php`
+2. Edit `config/result_codes.php` and add your mappings for each campaign:
+
+```php
+<?php
+return [
+    // Campaign configuration ID: 65704
+    65704 => [
+        [
+            'bitrix_outcome' => 'SUCCESS',
+            'workedCode' => 'W01',
+            'resultCode' => 'RC01',
+            'workedType' => 'CALL',
+            'description' => 'Chiamata completata con successo',
+        ],
+        [
+            'bitrix_outcome' => 'FAILED',
+            'workedCode' => 'W02',
+            'resultCode' => 'RC02',
+            'workedType' => 'CALL',
+            'description' => 'Chiamata fallita',
+        ],
+        // Add more mappings as needed
+    ],
+    
+    // Default mapping (used when no campaign-specific mapping exists)
+    'default' => [
+        // ...
+    ],
+];
+```
+
+**To find available InVoice result codes for a campaign**:
+```bash
+php scripts/fetch_result_codes.php <id_config_campagna>
+```
+
+This script will display all available `workedCode` and `resultCode` values for the specified campaign, which you can then map to your Bitrix outcomes.
+
+**How it works**:
+- When Bitrix calls the webhook with an activity outcome, the system looks up the mapping in `config/result_codes.php`
+- It first tries to find a campaign-specific mapping (using `id_config_campagna` from the deal)
+- If not found, it falls back to the `default` mapping
+- If no mapping is found, explicit `workedCode`/`resultCode` values must be provided in the webhook payload
+
+**Note**: The `config/result_codes.php` file is ignored by Git (see `.gitignore`). Use `config/result_codes.example.php` as a template.
+
 ### Field Mapping (InVoice → Bitrix24)
 
 The following InVoice fields are automatically mapped to Bitrix24:
@@ -308,7 +362,17 @@ BITRIX_OUT_PIPELINE=5  # Optional: only process deals in this pipeline (CATEGORY
 5. Headers: `x-api-auth-token: <BITRIX_WEBHOOK_TOKEN>`
 6. Body: Include `deal_id` and any additional fields (e.g., `workedCode`, `resultCode`, `workedType`, `caller`, `workedDate`, `workedEndDate`)
 
-**Note**: If `workedCode`, `resultCode`, `workedType`, `caller`, `workedDate`, `workedEndDate` are provided in the payload, they will be used directly. Otherwise, the webhook will use default values or require additional mapping configuration.
+**Result Codes Mapping**:
+- The webhook automatically maps Bitrix activity outcomes to InVoice `workedCode`/`resultCode` using `config/result_codes.php`
+- The webhook extracts the outcome from the payload (supports multiple formats: `outcome`, `status`, `result`, or from `data.FIELDS.RESULT`/`data.FIELDS.STATUS`)
+- If a mapping is found, it automatically sets `workedCode`, `resultCode`, and `workedType`
+- If no mapping is found, explicit values must be provided in the webhook payload
+- Explicit values in the payload always override the mapping
+
+**To configure outcome mapping**:
+1. Copy `config/result_codes.example.php` to `config/result_codes.php`
+2. Add mappings for each campaign configuration ID
+3. Use `php scripts/fetch_result_codes.php <id_config_campagna>` to find available InVoice codes
 
 ## Local Development
 
