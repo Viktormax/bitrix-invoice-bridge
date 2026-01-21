@@ -9,6 +9,9 @@ keys/
 *.key
 *.p12
 
+# Configuration files (user-specific)
+config/campaigns.php
+
 # Dependencies
 /vendor/
 composer.phar
@@ -17,6 +20,8 @@ composer.phar
 # Logs & runtime
 logs/
 *.log
+public/*.log
+public/php_errorlog
 storage/logs/
 storage/logs/**/*.json
 storage/logs/**/*.log
@@ -26,6 +31,8 @@ cache/
 # Token cache files (contain sensitive access tokens)
 storage/logs/invoice_token_cache_*.json
 **/invoice_token_cache_*.json
+storage/logs/invoice-token-cache/
+**/invoice-token-cache/
 
 # Local tooling
 .vscode/

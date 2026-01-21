@@ -1,16 +1,17 @@
 # Apache configuration for SiteGround hosting
-# Redirect all requests to index.php or specific endpoints
+# Allow direct access to all PHP files in this directory
 
 # Enable rewrite engine
 <IfModule mod_rewrite.c>
     RewriteEngine On
     RewriteBase /
     
-    # Allow direct access to PHP files
+    # Allow direct access to all existing files (PHP, images, etc.)
     RewriteCond %{REQUEST_FILENAME} -f
     RewriteRule ^ - [L]
     
-    # Deny access to hidden files
+    # Deny access to hidden files (except test files for debugging)
+    RewriteCond %{REQUEST_FILENAME} !^.*test.*\.php$
     RewriteRule ^\. - [F,L]
 </IfModule>
 
@@ -34,19 +35,41 @@
     php_value max_input_time 30
 </IfModule>
 
+# Explicitly allow webhook PHP files
+<FilesMatch "^(test_webhook|invoice-webhook)\.php$">
+    Order allow,deny
+    Allow from all
+</FilesMatch>
+
 # Deny access to sensitive files
 <FilesMatch "\.(env|log|ini|conf|key|pem|p12|sql|bak|backup)$">
     Order allow,deny
     Deny from all
 </FilesMatch>
 
+# Exception: Allow access to test_webhook.log and webhook_errors.log (for debugging only - remove in production)
+<FilesMatch "^(test_webhook|webhook_errors)\.log$">
+    Order allow,deny
+    Allow from all
+</FilesMatch>
+
 # Additional protection for .env files (Apache 2.4+)
 <IfModule mod_authz_core.c>
+    # Explicitly allow webhook PHP files
+    <FilesMatch "^(test_webhook|invoice-webhook)\.php$">
+        Require all granted
+    </FilesMatch>
+    
     <FilesMatch "^\.env">
         Require all denied
     </FilesMatch>
     <FilesMatch "\.env$">
         Require all denied
+    </FilesMatch>
+    
+    # Exception: Allow access to test_webhook.log and webhook_errors.log (for debugging only - remove in production)
+    <FilesMatch "^(test_webhook|webhook_errors)\.log$">
+        Require all granted
     </FilesMatch>
 </IfModule>
 

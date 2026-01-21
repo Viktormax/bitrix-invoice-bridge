@@ -198,6 +198,59 @@ class WebhookLogger
     }
 
     /**
+     * Log event processing (API calls, results, errors).
+     *
+     * @param string $requestId Original webhook request ID
+     * @param array $processingData Event processing information
+     * @return string The log file path where entry was written
+     */
+    public function logEventProcessing(string $requestId, array $processingData): string
+    {
+        $logFile = $this->getLogFile();
+        
+        $lines = [];
+        $lines[] = str_repeat('-', 80);
+        $lines[] = "EVENT_PROCESSING [REQUEST_ID: {$requestId}]";
+        $lines[] = "TIMESTAMP: " . date('c');
+        $lines[] = "EVENT: " . ($processingData['event'] ?? 'UNKNOWN');
+        
+        if (isset($processingData['lot_id'])) {
+            $lines[] = "LOT_ID: {$processingData['lot_id']}";
+        }
+        
+        $lines[] = "STATUS: " . ($processingData['status'] ?? 'unknown');
+        
+        if (isset($processingData['error'])) {
+            $lines[] = "ERROR: {$processingData['error']}";
+            if (isset($processingData['error_type'])) {
+                $lines[] = "ERROR_TYPE: {$processingData['error_type']}";
+            }
+        }
+        
+        if (isset($processingData['lot_data']) && $processingData['status'] === 'success') {
+            $lines[] = "LOT_DATA:";
+            $lotDataJson = json_encode($processingData['lot_data'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            $lines[] = $this->indent($lotDataJson);
+        }
+        
+        $lines[] = str_repeat('-', 80);
+        
+        $logEntry = implode("\n", $lines) . "\n";
+        
+        // Use file locking to prevent corruption
+        $fp = fopen($logFile, 'a');
+        if ($fp && flock($fp, LOCK_EX)) {
+            fwrite($fp, $logEntry);
+            flock($fp, LOCK_UN);
+            fclose($fp);
+        } else {
+            error_log("Failed to acquire lock or open log file: {$logFile}");
+        }
+        
+        return $logFile;
+    }
+
+    /**
      * Indent a multi-line string.
      */
     private function indent(string $text, int $spaces = 2): string
