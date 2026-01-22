@@ -419,21 +419,25 @@ try {
     }
     
     // Build Bitrix webhook URL
-    // Format: {client_endpoint}{user_id}/{token}/
-    // Standard format: https://domain.bitrix24.it/rest/{user_id}/{token}/
-    // We have: https://domain.bitrix24.it/rest/
-    // We need to append: {user_id}/{token}/
-    // Since we don't have user_id in the payload, we'll try using '1' as default
-    // Alternative: the application_token might already be a full webhook token
-    // Try format: {client_endpoint}1/{token}/
-    $webhookUrl = rtrim($bitrixClientEndpoint, '/') . '/1/' . $bitrixApplicationToken . '/';
+    // Use BITRIX24_WEBHOOK_URL from .env (already configured for Bitrix API calls)
+    // This is the webhook URL we use to call Bitrix REST API
+    $bitrixWebhookUrl = $_ENV['BITRIX24_WEBHOOK_URL'] ?? getenv('BITRIX24_WEBHOOK_URL');
     
-    // Note: If this doesn't work, we might need to try:
-    // - {client_endpoint}{token}/ (if token is already complete)
-    // - Extract user_id from member_id or other fields
-    // - Use a different authentication method
+    if (empty($bitrixWebhookUrl)) {
+        $dataLog['error'] = 'BITRIX24_WEBHOOK_URL not configured in .env';
+        @file_put_contents($bitrixDataLogFile, json_encode($dataLog, JSON_PRETTY_PRINT) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+        
+        $response['note'] = 'BITRIX24_WEBHOOK_URL not configured';
+        http_response_code(200);
+        header('Content-Type: application/json');
+        echo json_encode($response);
+        exit;
+    }
+    
+    $webhookUrl = rtrim($bitrixWebhookUrl, '/');
     
     $dataLog['step'] = 'building_webhook_url';
+    $dataLog['webhook_url_source'] = 'from_env';
     $dataLog['webhook_url'] = preg_replace('/\/[^\/]+\/[^\/]+\/$/', '/***/***/', $webhookUrl); // Mask token in log
     
     // Initialize Bitrix API client
