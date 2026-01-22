@@ -455,7 +455,10 @@ class InvoiceApiClient
 
         $responseData = json_decode($response, true);
         if (json_last_error() !== JSON_ERROR_NONE) {
-            throw new \Exception("Invalid JSON response: {$response}");
+            $errorMsg = json_last_error_msg();
+            $responsePreview = strlen($response) > 500 ? substr($response, 0, 500) . '...' : $response;
+            $responseLength = strlen($response);
+            throw new \Exception("Invalid JSON response: {$errorMsg}. Response length: {$responseLength}. Response preview: {$responsePreview}. HTTP Code: {$httpCode}");
         }
 
         if ($httpCode < 200 || $httpCode >= 300) {

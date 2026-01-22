@@ -822,19 +822,28 @@ if (isset($dataLog['success']) && $dataLog['success'] === true &&
         // Translate outcome to InVoice result code
         $pollLog['step'] = 'translating_outcome';
         $invoiceResultCode = null;
-        if ($finalOutcome !== null && $finalOutcome !== '') {
+        
+        // Skip if outcome is empty or null
+        if (empty($finalOutcome) || $finalOutcome === '' || $finalOutcome === null) {
+            $pollLog['error'] = 'Outcome is empty, skipping InVoice submission';
+            $pollLog['note'] = 'No outcome value to translate. Activity may not have been completed yet.';
+            $pollLog['skipped'] = true;
+            error_log("BitrixWebhook [{$requestId}]: Skipping InVoice submission - outcome is empty");
+        } else {
             $invoiceResultCode = translateOutcome($finalOutcome);
             $pollLog['translation'] = [
                 'bitrix_outcome' => $finalOutcome,
                 'invoice_result_code' => $invoiceResultCode,
                 'translation_found' => $invoiceResultCode !== null,
             ];
+            
+            if ($invoiceResultCode === null) {
+                $pollLog['error'] = 'No translation found for outcome: ' . $finalOutcome;
+                error_log("BitrixWebhook [{$requestId}]: No translation found for outcome {$finalOutcome}");
+            }
         }
         
-        if ($invoiceResultCode === null) {
-            $pollLog['error'] = 'No translation found for outcome: ' . $finalOutcome;
-            error_log("BitrixWebhook [{$requestId}]: No translation found for outcome {$finalOutcome}");
-        } else {
+        if ($invoiceResultCode !== null) {
             // Build worked payload and send to InVoice
             $pollLog['step'] = 'building_invoice_payload';
             
@@ -880,12 +889,22 @@ if (isset($dataLog['success']) && $dataLog['success'] === true &&
             $invoice->setCredentials($invoiceClientId, $invoiceJwk);
             
             // Submit to InVoice
-            $invoiceResponse = $invoice->submitWorkedContact($workedPayload);
-            $pollLog['invoice_response'] = $invoiceResponse;
-            $pollLog['step'] = 'completed';
-            $pollLog['success'] = true;
-            
-            error_log("BitrixWebhook [{$requestId}]: Successfully submitted to InVoice. Outcome: {$finalOutcome} -> {$invoiceResultCode}");
+            try {
+                $invoiceResponse = $invoice->submitWorkedContact($workedPayload);
+                $pollLog['invoice_response'] = $invoiceResponse;
+                $pollLog['step'] = 'completed';
+                $pollLog['success'] = true;
+                
+                error_log("BitrixWebhook [{$requestId}]: Successfully submitted to InVoice. Outcome: {$finalOutcome} -> {$invoiceResultCode}");
+            } catch (\Exception $invoiceException) {
+                // Log detailed error information
+                $pollLog['invoice_error'] = $invoiceException->getMessage();
+                $pollLog['invoice_error_trace'] = $invoiceException->getTraceAsString();
+                $pollLog['invoice_error_file'] = $invoiceException->getFile();
+                $pollLog['invoice_error_line'] = $invoiceException->getLine();
+                error_log("BitrixWebhook [{$requestId}]: InVoice submission failed: " . $invoiceException->getMessage());
+                throw $invoiceException; // Re-throw to be caught by outer catch
+            }
             
         }
         
