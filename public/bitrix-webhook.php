@@ -531,11 +531,24 @@ try {
     // Step 3: Verify pipeline (CATEGORY_ID) against PIPELINE_ACTIVITY
     $dataLog['step'] = 'verifying_pipeline';
     $dealCategoryId = isset($dealData['CATEGORY_ID']) ? (int)$dealData['CATEGORY_ID'] : null;
+    
+    // Read PIPELINE_ACTIVITY from environment (with debug logging)
     $pipelineActivityRaw = $_ENV['PIPELINE_ACTIVITY'] ?? getenv('PIPELINE_ACTIVITY');
-    $pipelineActivity = ($pipelineActivityRaw !== null && $pipelineActivityRaw !== '') ? (int)$pipelineActivityRaw : null;
+    $dataLog['pipeline_activity_raw'] = $pipelineActivityRaw;
+    $dataLog['pipeline_activity_raw_type'] = gettype($pipelineActivityRaw);
+    $dataLog['pipeline_activity_in_env'] = isset($_ENV['PIPELINE_ACTIVITY']);
+    $dataLog['pipeline_activity_in_getenv'] = getenv('PIPELINE_ACTIVITY') !== false;
+    
+    // Convert to integer if not empty, otherwise null
+    if ($pipelineActivityRaw !== null && $pipelineActivityRaw !== '' && $pipelineActivityRaw !== '0') {
+        $pipelineActivity = (int)$pipelineActivityRaw;
+    } else {
+        $pipelineActivity = null;
+    }
     
     $dataLog['deal_category_id'] = $dealCategoryId;
     $dataLog['pipeline_activity_configured'] = $pipelineActivity;
+    $dataLog['pipeline_activity_configured_type'] = gettype($pipelineActivity);
     $dataLog['pipeline_match'] = ($pipelineActivity !== null && $dealCategoryId === $pipelineActivity);
     
     if ($pipelineActivity !== null && $dealCategoryId !== $pipelineActivity) {
