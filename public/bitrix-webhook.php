@@ -339,6 +339,121 @@ if ($logger) {
 }
 
 // ---------------------------------------------------------------------
+// Helper functions for outcome mapping and polling
+// ---------------------------------------------------------------------
+
+/**
+ * Read outcome mapping configuration.
+ * 
+ * @return array Outcome mapping (Bitrix ID => InVoice code)
+ */
+function readOutcomeMapping(): array
+{
+    static $outcomeMapping = null;
+    
+    if ($outcomeMapping === null) {
+        $configFile = __DIR__ . '/../config/outcome_mapping.php';
+        $exampleFile = __DIR__ . '/../config/outcome_mapping.example.php';
+        
+        // Try actual config first, then example
+        if (file_exists($configFile)) {
+            $outcomeMapping = require $configFile;
+        } elseif (file_exists($exampleFile)) {
+            $outcomeMapping = require $exampleFile;
+        } else {
+            $outcomeMapping = [];
+        }
+        
+        if (!is_array($outcomeMapping)) {
+            $outcomeMapping = [];
+        }
+    }
+    
+    return $outcomeMapping;
+}
+
+/**
+ * Translate Bitrix outcome ID to InVoice result code.
+ * 
+ * @param int|string $bitrixOutcomeId Bitrix outcome ID
+ * @return string|null InVoice result code, or null if not found
+ */
+function translateOutcome($bitrixOutcomeId): ?string
+{
+    $mapping = readOutcomeMapping();
+    $outcomeId = (int)$bitrixOutcomeId;
+    
+    return $mapping[$outcomeId] ?? null;
+}
+
+/**
+ * Poll deal outcome field for changes.
+ * 
+ * @param Bitrix24ApiClient $bitrix Bitrix API client
+ * @param int $dealId Deal ID
+ * @param string $esitoFieldId Custom field ID for outcome
+ * @param mixed $initialOutcome Initial outcome value
+ * @param int $maxAttempts Maximum polling attempts (default: 2)
+ * @param int $delay Delay between attempts in seconds (default: 60)
+ * @return array ['outcome' => mixed, 'changed' => bool, 'attempts' => int]
+ */
+function pollDealOutcome(Bitrix24ApiClient $bitrix, int $dealId, string $esitoFieldId, $initialOutcome, int $maxAttempts = 2, int $delay = 60): array
+{
+    $pollLog = [
+        'initial_outcome' => $initialOutcome,
+        'attempts' => 0,
+        'changed' => false,
+        'final_outcome' => $initialOutcome,
+    ];
+    
+    for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+        $pollLog['attempts'] = $attempt;
+        $pollLog['attempt_' . $attempt] = [
+            'timestamp' => date('Y-m-d H:i:s'),
+            'sleep_before' => $delay,
+        ];
+        
+        // Sleep before checking (except first attempt which happens immediately after initial read)
+        if ($attempt > 1) {
+            sleep($delay);
+        }
+        
+        try {
+            // Fetch updated deal
+            $dealResponse = $bitrix->getDeal($dealId);
+            $dealData = $dealResponse['result'] ?? null;
+            
+            if (!is_array($dealData)) {
+                $pollLog['attempt_' . $attempt]['error'] = 'Failed to fetch deal data';
+                error_log("BitrixWebhook: Poll attempt {$attempt} failed - no deal data");
+                continue;
+            }
+            
+            $currentOutcome = $dealData[$esitoFieldId] ?? null;
+            $pollLog['attempt_' . $attempt]['outcome'] = $currentOutcome;
+            $pollLog['attempt_' . $attempt]['outcome_changed'] = ($currentOutcome !== $initialOutcome);
+            
+            // Check if outcome changed
+            if ($currentOutcome !== $initialOutcome && $currentOutcome !== null && $currentOutcome !== '') {
+                $pollLog['changed'] = true;
+                $pollLog['final_outcome'] = $currentOutcome;
+                $pollLog['changed_at_attempt'] = $attempt;
+                error_log("BitrixWebhook: Outcome changed at attempt {$attempt}: {$initialOutcome} -> {$currentOutcome}");
+                break;
+            }
+            
+        } catch (\Exception $e) {
+            $pollLog['attempt_' . $attempt]['error'] = $e->getMessage();
+            error_log("BitrixWebhook: Poll attempt {$attempt} failed: " . $e->getMessage());
+        }
+    }
+    
+    $pollLog['final_outcome'] = $pollLog['changed'] ? $pollLog['final_outcome'] : $initialOutcome;
+    
+    return $pollLog;
+}
+
+// ---------------------------------------------------------------------
 // Extract Bitrix API credentials and fetch activity/deal data
 // ---------------------------------------------------------------------
 
@@ -622,6 +737,15 @@ try {
         'CATEGORY_ID' => $dealCategoryId,
     ];
     
+    // Step 6: Read initial outcome from custom field
+    $dataLog['step'] = 'reading_initial_outcome';
+    $esitoFieldId = $fieldConfig['esito'] ?? 'UF_CRM_1761843804';
+    $initialOutcome = $dealData[$esitoFieldId] ?? null;
+    
+    $dataLog['esito_field_id'] = $esitoFieldId;
+    $dataLog['initial_outcome'] = $initialOutcome;
+    $dataLog['initial_outcome_type'] = gettype($initialOutcome);
+    
     // Summary for easy reading
     $dataLog['summary'] = [
         'activity_id' => $activityId,
@@ -630,13 +754,11 @@ try {
         'pipeline_match' => ($pipelineActivity === null || $dealCategoryId === $pipelineActivity),
         'invoice_id_anagrafica' => $invoiceIdAnagrafica,
         'invoice_id_campagna' => $invoiceIdCampagna,
-        'activity_outcome' => $activityOutcome,
-        'activity_status' => $activityStatus,
-        'deal_stage_id' => $dealStageId,
+        'initial_outcome' => $initialOutcome,
         'ready_for_invoice' => !empty($invoiceIdAnagrafica) && !empty($invoiceIdCampagna) && ($pipelineActivity === null || $dealCategoryId === $pipelineActivity),
     ];
     
-    $dataLog['step'] = 'completed';
+    $dataLog['step'] = 'ready_for_polling';
     $dataLog['success'] = true;
     
 } catch (\Exception $e) {
@@ -647,14 +769,141 @@ try {
     error_log("BitrixWebhook [{$requestId}]: Error processing: " . $e->getMessage());
 }
 
-// Write data log
+// Write initial data log
 @file_put_contents($bitrixDataLogFile, json_encode($dataLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
 
-$response['note'] = 'Data retrieved and logged. Check bitrix-data-retrieval.log for details.';
+// Respond immediately to webhook (don't wait for polling)
+$response['note'] = 'Processing started. Polling outcome in background.';
 $response['processed'] = true;
 http_response_code(200);
 header('Content-Type: application/json');
 echo json_encode($response);
+
+// Close connection and continue processing in background
+if (function_exists('fastcgi_finish_request')) {
+    fastcgi_finish_request();
+} else {
+    // Fallback: flush output buffers
+    if (ob_get_level() > 0) {
+        ob_end_flush();
+    }
+    flush();
+}
+
+// ---------------------------------------------------------------------
+// Background processing: Poll outcome and send to InVoice
+// ---------------------------------------------------------------------
+
+// Only proceed if we have all required data
+if (isset($dataLog['success']) && $dataLog['success'] === true && 
+    isset($invoiceIdAnagrafica) && !empty($invoiceIdAnagrafica) &&
+    isset($invoiceIdCampagna) && !empty($invoiceIdCampagna) &&
+    isset($dealId) && isset($bitrix) && isset($esitoFieldId)) {
+    
+    $pollLog = [
+        'request_id' => $requestId,
+        'timestamp' => date('Y-m-d H:i:s'),
+        'step' => 'polling_started',
+        'deal_id' => $dealId,
+        'esito_field_id' => $esitoFieldId,
+        'initial_outcome' => $initialOutcome ?? null,
+    ];
+    
+    try {
+        // Poll for outcome changes
+        $pollResult = pollDealOutcome($bitrix, $dealId, $esitoFieldId, $initialOutcome, 2, 60);
+        $pollLog['poll_result'] = $pollResult;
+        
+        // Determine final outcome to use
+        $finalOutcome = $pollResult['final_outcome'];
+        $pollLog['final_outcome'] = $finalOutcome;
+        $pollLog['outcome_changed'] = $pollResult['changed'];
+        
+        // Translate outcome to InVoice result code
+        $pollLog['step'] = 'translating_outcome';
+        $invoiceResultCode = null;
+        if ($finalOutcome !== null && $finalOutcome !== '') {
+            $invoiceResultCode = translateOutcome($finalOutcome);
+            $pollLog['translation'] = [
+                'bitrix_outcome' => $finalOutcome,
+                'invoice_result_code' => $invoiceResultCode,
+                'translation_found' => $invoiceResultCode !== null,
+            ];
+        }
+        
+        if ($invoiceResultCode === null) {
+            $pollLog['error'] = 'No translation found for outcome: ' . $finalOutcome;
+            error_log("BitrixWebhook [{$requestId}]: No translation found for outcome {$finalOutcome}");
+        } else {
+            // Build worked payload and send to InVoice
+            $pollLog['step'] = 'building_invoice_payload';
+            
+            // Get activity dates (use current time if not available)
+            $workedDate = $activityData['CREATED'] ?? date('Y-m-d H:i:s');
+            $workedEndDate = $activityData['END_TIME'] ?? date('Y-m-d H:i:s');
+            
+            // Get caller (from activity or use default)
+            $caller = $activityData['SUBJECT'] ?? 'SYSTEM';
+            
+            // Get id_config_campagna for mapping
+            $idConfigCampagna = $dealData[$fieldConfig['id_config_campagna'] ?? 'UF_CRM_INVOICE_CAMPAIGN_CONFIG_ID'] ?? null;
+            
+            $workedInput = [
+                'contactId' => (int)$invoiceIdAnagrafica,
+                'campaignId' => (int)$invoiceIdCampagna,
+                'workedDate' => $workedDate,
+                'workedEndDate' => $workedEndDate,
+                'caller' => $caller,
+                'resultCode' => $invoiceResultCode, // Use translated outcome
+                'workedCode' => $invoiceResultCode, // Use same code for workedCode
+                'workedType' => 'CALL', // Default to CALL, can be configured
+            ];
+            
+            $pollLog['worked_input'] = $workedInput;
+            
+            // Build payload using mapper
+            $pollLog['step'] = 'submitting_to_invoice';
+            $workedPayload = BitrixToInvoiceWorkedMapper::buildWorkedPayload($workedInput);
+            $pollLog['worked_payload'] = $workedPayload;
+            
+            // Initialize InVoice client
+            $invoiceBaseUrl = $_ENV['INVOICE_API_BASE_URL'] ?? getenv('INVOICE_API_BASE_URL') ?: 'https://enel.in-voice.it';
+            $invoiceClientId = $_ENV['INVOICE_CLIENT_ID'] ?? getenv('INVOICE_CLIENT_ID');
+            $invoiceJwk = $_ENV['INVOICE_JWK_JSON'] ?? getenv('INVOICE_JWK_JSON');
+            
+            if (empty($invoiceClientId) || empty($invoiceJwk)) {
+                throw new \Exception('InVoice credentials not configured');
+            }
+            
+            $tokenCacheDir = __DIR__ . '/../storage/logs/invoice-token-cache';
+            $invoice = new InvoiceApiClient($invoiceBaseUrl, $tokenCacheDir);
+            $invoice->setCredentials($invoiceClientId, $invoiceJwk);
+            
+            // Submit to InVoice
+            $invoiceResponse = $invoice->submitWorkedContact($workedPayload);
+            $pollLog['invoice_response'] = $invoiceResponse;
+            $pollLog['step'] = 'completed';
+            $pollLog['success'] = true;
+            
+            error_log("BitrixWebhook [{$requestId}]: Successfully submitted to InVoice. Outcome: {$finalOutcome} -> {$invoiceResultCode}");
+            
+        }
+        
+    } catch (\Exception $e) {
+        $pollLog['step'] = 'error';
+        $pollLog['error'] = $e->getMessage();
+        $pollLog['trace'] = $e->getTraceAsString();
+        $pollLog['success'] = false;
+        error_log("BitrixWebhook [{$requestId}]: Error in background processing: " . $e->getMessage());
+    }
+    
+    // Write polling log
+    @file_put_contents($bitrixDataLogFile, "POLLING_RESULT: " . json_encode($pollLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+    
+} else {
+    error_log("BitrixWebhook [{$requestId}]: Skipping background processing - missing required data");
+}
+
 exit;
 
 // ---------------------------------------------------------------------

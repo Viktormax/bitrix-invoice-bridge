@@ -13,6 +13,7 @@ keys/
 config/campaigns.php
 config/bitrix_fields.php
 config/result_codes.php
+config/outcome_mapping.php
 
 # Dependencies
 /vendor/

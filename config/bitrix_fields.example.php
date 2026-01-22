@@ -33,4 +33,9 @@ return [
     // InVoice End Date (DateTime field)
     // Maps to: DATA_SCADENZA from InVoice lot data (converted from DD/MM/YYYY to YYYY-MM-DD 00:00:00)
     'data_fine' => 'UF_CRM_1762868603',
+    
+    // Activity Outcome (Custom field)
+    // Maps to: Custom field for activity outcome (manually updated by user)
+    // This field is used to determine the result code to send to InVoice
+    'esito' => 'UF_CRM_1761843804',
 ];
