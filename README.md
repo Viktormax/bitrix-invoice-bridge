@@ -130,7 +130,8 @@ The application is configured via environment variables in the `.env` file. See 
 - `BITRIX_WEBHOOK_TOKEN`: Shared secret token for authenticating Bitrix calls to `public/bitrix-webhook.php`
   - Can be passed via HTTP header: `x-api-auth-token: <token>` (recommended)
   - Or via body field: `auth[application_token]: <token>` (Bitrix native format, also supported)
-- `BITRIX_OUT_PIPELINE`: Restrict processing to a specific deal pipeline (Bitrix `CATEGORY_ID`). If empty/0, all pipelines are accepted.
+- `PIPELINE_ACTIVITY`: Pipeline ID (Bitrix `CATEGORY_ID`) for filtering activities. Only activities linked to deals in this pipeline will be processed. If empty/0, all pipelines are accepted.
+- `BITRIX_OUT_PIPELINE`: **Deprecated** - Use `PIPELINE_ACTIVITY` instead. Restrict processing to a specific deal pipeline (Bitrix `CATEGORY_ID`). If empty/0, all pipelines are accepted.
 
 #### Application Configuration
 - `APP_ENV`: Application environment (`production`, `development`, `staging`)
@@ -386,9 +387,11 @@ The system supports a **reverse flow** where Bitrix24 calls our webhook endpoint
 3. **Processing**: Our webhook:
    - Validates authentication
    - Extracts `deal_id` from payload
-   - Fetches deal from Bitrix24 API
-   - Filters by pipeline (if `BITRIX_OUT_PIPELINE` is configured)
+   - Fetches activity details using `crm.activity.get` (verifies `OWNER_TYPE_ID=2` for Deal)
+   - Fetches deal from Bitrix24 API using `crm.deal.get`
+   - Filters by pipeline (if `PIPELINE_ACTIVITY` is configured, checks deal `CATEGORY_ID`)
    - Reads InVoice references from custom fields (`id_anagrafica`, `id_campagna`)
+   - Extracts activity outcome and deal status
    - Builds "worked" payload and submits to InVoice API (`POST /partner-api/v5/worked`)
 
 #### Configuration
@@ -398,7 +401,7 @@ Add to your `.env` file:
 ```bash
 # Bitrix -> InVoice reverse flow
 BITRIX_WEBHOOK_TOKEN=your-shared-secret-token-here
-BITRIX_OUT_PIPELINE=5  # Optional: only process deals in this pipeline (CATEGORY_ID)
+PIPELINE_ACTIVITY=5  # Optional: only process activities linked to deals in this pipeline (CATEGORY_ID)
 ```
 
 #### Bitrix24 Automation Setup

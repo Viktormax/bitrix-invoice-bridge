@@ -370,12 +370,26 @@ try {
     $dataLog['bitrix_event'] = $bitrixEvent;
     $dataLog['activity_id'] = $activityId;
     
-    if (empty($bitrixEvent) || empty($activityId)) {
-        $dataLog['error'] = 'Missing event or activity ID in payload';
+    // Only process ONCRMACTIVITYADD events
+    if ($bitrixEvent !== 'ONCRMACTIVITYADD') {
+        $dataLog['step'] = 'event_filtered';
+        $dataLog['note'] = "Event '{$bitrixEvent}' is not ONCRMACTIVITYADD, skipping";
+        $dataLog['success'] = true;
+        @file_put_contents($bitrixDataLogFile, json_encode($dataLog, JSON_PRETTY_PRINT) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+        
+        $response['note'] = "Event '{$bitrixEvent}' not processed (only ONCRMACTIVITYADD)";
+        http_response_code(200);
+        header('Content-Type: application/json');
+        echo json_encode($response);
+        exit;
+    }
+    
+    if (empty($activityId)) {
+        $dataLog['error'] = 'Missing activity ID in payload';
         $dataLog['decoded_payload'] = $decoded;
         @file_put_contents($bitrixDataLogFile, json_encode($dataLog, JSON_PRETTY_PRINT) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
         
-        $response['note'] = 'Missing event or activity ID in payload';
+        $response['note'] = 'Missing activity ID in payload';
         http_response_code(200);
         header('Content-Type: application/json');
         echo json_encode($response);
@@ -425,85 +439,185 @@ try {
     // Initialize Bitrix API client
     $bitrix = new Bitrix24ApiClient($webhookUrl);
     
-    // Step 1: Get activity details
+    // Step 1: Get activity details using crm.activity.get
     $dataLog['step'] = 'fetching_activity';
+    $dataLog['api_call'] = 'crm.activity.get';
     $activityData = null;
     try {
         $activityResponse = $bitrix->getActivity((int)$activityId);
         $activityData = $activityResponse['result'] ?? null;
         $dataLog['activity_fetch_success'] = true;
+        $dataLog['activity_response'] = $activityResponse;
         $dataLog['activity_data'] = $activityData;
     } catch (\Exception $e) {
         $dataLog['activity_fetch_error'] = $e->getMessage();
         $dataLog['activity_fetch_success'] = false;
         error_log("BitrixWebhook [{$requestId}]: Failed to fetch activity {$activityId}: " . $e->getMessage());
+        
+        // Stop processing if we can't fetch activity
+        $dataLog['step'] = 'error';
+        $dataLog['success'] = false;
+        @file_put_contents($bitrixDataLogFile, json_encode($dataLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+        
+        $response['note'] = 'Failed to fetch activity from Bitrix';
+        http_response_code(200);
+        header('Content-Type: application/json');
+        echo json_encode($response);
+        exit;
     }
     
-    // Extract deal ID from activity
-    $dealId = null;
-    if ($activityData && isset($activityData['OWNER_TYPE_ID'], $activityData['OWNER_ID'])) {
-        // OWNER_TYPE_ID: 1=Contact, 2=Deal, 3=Company, 4=Lead
-        if ((int)$activityData['OWNER_TYPE_ID'] === 2) {
-            $dealId = (int)$activityData['OWNER_ID'];
-        }
+    // Verify OWNER_TYPE_ID: must be 2 (DEAL)
+    $dataLog['step'] = 'verifying_owner_type';
+    $ownerTypeId = isset($activityData['OWNER_TYPE_ID']) ? (int)$activityData['OWNER_TYPE_ID'] : null;
+    $ownerId = isset($activityData['OWNER_ID']) ? (int)$activityData['OWNER_ID'] : null;
+    
+    $dataLog['activity_owner_type_id'] = $ownerTypeId;
+    $dataLog['activity_owner_id'] = $ownerId;
+    $dataLog['owner_type_name'] = [
+        1 => 'Contact',
+        2 => 'Deal',
+        3 => 'Company',
+        4 => 'Lead',
+    ][$ownerTypeId] ?? 'Unknown';
+    
+    if ($ownerTypeId !== 2) {
+        $dataLog['step'] = 'owner_type_mismatch';
+        $dataLog['note'] = "OWNER_TYPE_ID is {$ownerTypeId} (not 2=DEAL), skipping";
+        $dataLog['success'] = true;
+        @file_put_contents($bitrixDataLogFile, json_encode($dataLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+        
+        $response['note'] = "Activity is not linked to a Deal (OWNER_TYPE_ID={$ownerTypeId})";
+        http_response_code(200);
+        header('Content-Type: application/json');
+        echo json_encode($response);
+        exit;
     }
     
+    // Extract deal ID (OWNER_ID when OWNER_TYPE_ID = 2)
+    $dealId = $ownerId;
     $dataLog['step'] = 'extracted_deal_id';
     $dataLog['deal_id'] = $dealId;
-    $dataLog['activity_owner_type_id'] = $activityData['OWNER_TYPE_ID'] ?? null;
-    $dataLog['activity_owner_id'] = $activityData['OWNER_ID'] ?? null;
     
-    // Step 2: Get deal details (including custom fields)
+    // Step 2: Get deal details using crm.deal.get
+    $dataLog['step'] = 'fetching_deal';
+    $dataLog['api_call'] = 'crm.deal.get';
     $dealData = null;
-    if ($dealId) {
-        $dataLog['step'] = 'fetching_deal';
-        try {
-            $dealResponse = $bitrix->getDeal($dealId);
-            $dealData = $dealResponse['result'] ?? null;
-            $dataLog['deal_fetch_success'] = true;
-            
-            // Extract custom fields (all fields that start with UF_CRM_)
-            $customFields = [];
-            if (is_array($dealData)) {
-                foreach ($dealData as $key => $value) {
-                    if (strpos($key, 'UF_CRM_') === 0) {
-                        $customFields[$key] = $value;
-                    }
-                }
-            }
-            $dataLog['deal_custom_fields'] = $customFields;
-            
-            // Extract InVoice-specific custom fields using config
-            $fieldConfig = Bitrix24ApiClient::getBitrixFieldConfig();
-            $invoiceFields = [
-                'id_anagrafica' => $dealData[$fieldConfig['id_anagrafica'] ?? 'UF_CRM_INVOICE_ID_ANAGRAFICA'] ?? null,
-                'id_campagna' => $dealData[$fieldConfig['id_campagna'] ?? 'UF_CRM_INVOICE_CAMPAIGN_ID'] ?? null,
-                'id_config_campagna' => $dealData[$fieldConfig['id_config_campagna'] ?? 'UF_CRM_INVOICE_CAMPAIGN_CONFIG_ID'] ?? null,
-                'data_inizio' => $dealData[$fieldConfig['data_inizio'] ?? 'UF_CRM_INVOICE_DATA_INIZIO'] ?? null,
-                'data_fine' => $dealData[$fieldConfig['data_fine'] ?? 'UF_CRM_INVOICE_DATA_FINE'] ?? null,
-            ];
-            $dataLog['invoice_fields'] = $invoiceFields;
-            
-            // Extract deal category (pipeline)
-            $dataLog['deal_category_id'] = $dealData['CATEGORY_ID'] ?? null;
-            $dataLog['deal_title'] = $dealData['TITLE'] ?? null;
-            $dataLog['deal_stage_id'] = $dealData['STAGE_ID'] ?? null;
-            
-            // Extract activity outcome/result
-            $dataLog['activity_result'] = $activityData['RESULT'] ?? null;
-            $dataLog['activity_subject'] = $activityData['SUBJECT'] ?? null;
-            $dataLog['activity_type_id'] = $activityData['TYPE_ID'] ?? null;
-            $dataLog['activity_direction'] = $activityData['DIRECTION'] ?? null;
-            $dataLog['activity_status'] = $activityData['STATUS'] ?? null;
-            
-        } catch (\Exception $e) {
-            $dataLog['deal_fetch_error'] = $e->getMessage();
-            $dataLog['deal_fetch_success'] = false;
-            error_log("BitrixWebhook [{$requestId}]: Failed to fetch deal {$dealId}: " . $e->getMessage());
-        }
-    } else {
-        $dataLog['note'] = 'No deal ID found in activity (activity is not linked to a deal)';
+    try {
+        $dealResponse = $bitrix->getDeal($dealId);
+        $dealData = $dealResponse['result'] ?? null;
+        $dataLog['deal_fetch_success'] = true;
+        $dataLog['deal_response'] = $dealResponse;
+    } catch (\Exception $e) {
+        $dataLog['deal_fetch_error'] = $e->getMessage();
+        $dataLog['deal_fetch_success'] = false;
+        error_log("BitrixWebhook [{$requestId}]: Failed to fetch deal {$dealId}: " . $e->getMessage());
+        
+        // Stop processing if we can't fetch deal
+        $dataLog['step'] = 'error';
+        $dataLog['success'] = false;
+        @file_put_contents($bitrixDataLogFile, json_encode($dataLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+        
+        $response['note'] = 'Failed to fetch deal from Bitrix';
+        http_response_code(200);
+        header('Content-Type: application/json');
+        echo json_encode($response);
+        exit;
     }
+    
+    // Step 3: Verify pipeline (CATEGORY_ID) against PIPELINE_ACTIVITY
+    $dataLog['step'] = 'verifying_pipeline';
+    $dealCategoryId = isset($dealData['CATEGORY_ID']) ? (int)$dealData['CATEGORY_ID'] : null;
+    $pipelineActivityRaw = $_ENV['PIPELINE_ACTIVITY'] ?? getenv('PIPELINE_ACTIVITY');
+    $pipelineActivity = ($pipelineActivityRaw !== null && $pipelineActivityRaw !== '') ? (int)$pipelineActivityRaw : null;
+    
+    $dataLog['deal_category_id'] = $dealCategoryId;
+    $dataLog['pipeline_activity_configured'] = $pipelineActivity;
+    $dataLog['pipeline_match'] = ($pipelineActivity !== null && $dealCategoryId === $pipelineActivity);
+    
+    if ($pipelineActivity !== null && $dealCategoryId !== $pipelineActivity) {
+        $dataLog['step'] = 'pipeline_mismatch';
+        $dataLog['note'] = "Deal CATEGORY_ID ({$dealCategoryId}) does not match PIPELINE_ACTIVITY ({$pipelineActivity}), skipping";
+        $dataLog['success'] = true;
+        @file_put_contents($bitrixDataLogFile, json_encode($dataLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+        
+        $response['note'] = "Deal not in target pipeline (CATEGORY_ID={$dealCategoryId}, expected={$pipelineActivity})";
+        http_response_code(200);
+        header('Content-Type: application/json');
+        echo json_encode($response);
+        exit;
+    }
+    
+    // Step 4: Extract InVoice custom fields (ID Anagrafica Invoice and ID Campagna Invoice)
+    $dataLog['step'] = 'extracting_invoice_fields';
+    $fieldConfig = Bitrix24ApiClient::getBitrixFieldConfig();
+    
+    // Extract all custom fields for reference
+    $customFields = [];
+    if (is_array($dealData)) {
+        foreach ($dealData as $key => $value) {
+            if (strpos($key, 'UF_CRM_') === 0) {
+                $customFields[$key] = $value;
+            }
+        }
+    }
+    $dataLog['deal_custom_fields'] = $customFields;
+    $dataLog['field_config_used'] = $fieldConfig;
+    
+    // Extract InVoice-specific fields (focus on ID Anagrafica and ID Campagna)
+    $invoiceIdAnagrafica = $dealData[$fieldConfig['id_anagrafica'] ?? 'UF_CRM_INVOICE_ID_ANAGRAFICA'] ?? null;
+    $invoiceIdCampagna = $dealData[$fieldConfig['id_campagna'] ?? 'UF_CRM_INVOICE_CAMPAIGN_ID'] ?? null;
+    
+    $invoiceFields = [
+        'id_anagrafica' => $invoiceIdAnagrafica,
+        'id_campagna' => $invoiceIdCampagna,
+        'id_config_campagna' => $dealData[$fieldConfig['id_config_campagna'] ?? 'UF_CRM_INVOICE_CAMPAIGN_CONFIG_ID'] ?? null,
+        'data_inizio' => $dealData[$fieldConfig['data_inizio'] ?? 'UF_CRM_INVOICE_DATA_INIZIO'] ?? null,
+        'data_fine' => $dealData[$fieldConfig['data_fine'] ?? 'UF_CRM_INVOICE_DATA_FINE'] ?? null,
+    ];
+    $dataLog['invoice_fields'] = $invoiceFields;
+    $dataLog['invoice_id_anagrafica'] = $invoiceIdAnagrafica;
+    $dataLog['invoice_id_campagna'] = $invoiceIdCampagna;
+    
+    // Step 5: Extract activity outcome and deal status
+    $dataLog['step'] = 'extracting_outcome_and_status';
+    
+    // Activity outcome/result (multiple possible fields)
+    $activityOutcome = $activityData['RESULT'] ?? null;
+    $activityStatus = $activityData['STATUS'] ?? null;
+    $activitySubject = $activityData['SUBJECT'] ?? null;
+    $activityTypeId = $activityData['TYPE_ID'] ?? null;
+    $activityDirection = $activityData['DIRECTION'] ?? null;
+    
+    // Deal status
+    $dealStageId = $dealData['STAGE_ID'] ?? null;
+    $dealTitle = $dealData['TITLE'] ?? null;
+    
+    $dataLog['activity_outcome'] = [
+        'RESULT' => $activityOutcome,
+        'STATUS' => $activityStatus,
+        'SUBJECT' => $activitySubject,
+        'TYPE_ID' => $activityTypeId,
+        'DIRECTION' => $activityDirection,
+    ];
+    $dataLog['deal_status'] = [
+        'STAGE_ID' => $dealStageId,
+        'TITLE' => $dealTitle,
+        'CATEGORY_ID' => $dealCategoryId,
+    ];
+    
+    // Summary for easy reading
+    $dataLog['summary'] = [
+        'activity_id' => $activityId,
+        'deal_id' => $dealId,
+        'deal_category_id' => $dealCategoryId,
+        'pipeline_match' => ($pipelineActivity === null || $dealCategoryId === $pipelineActivity),
+        'invoice_id_anagrafica' => $invoiceIdAnagrafica,
+        'invoice_id_campagna' => $invoiceIdCampagna,
+        'activity_outcome' => $activityOutcome,
+        'activity_status' => $activityStatus,
+        'deal_stage_id' => $dealStageId,
+        'ready_for_invoice' => !empty($invoiceIdAnagrafica) && !empty($invoiceIdCampagna) && ($pipelineActivity === null || $dealCategoryId === $pipelineActivity),
+    ];
     
     $dataLog['step'] = 'completed';
     $dataLog['success'] = true;
