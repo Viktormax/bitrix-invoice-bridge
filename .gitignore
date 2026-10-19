@@ -53,4 +53,4 @@ tests/coverage/
 tests-manual/
 
 # Documentation (internal, not for public repo)
-Documentazione/
+Documentazione/config/campaign_pipelines.php

@@ -337,6 +337,47 @@ class Bitrix24ApiClient
     }
 
     /**
+     * Load the id_config_campagna => pipeline mapping from config/campaign_pipelines.php.
+     * Missing or invalid file means "no overrides": every campaign keeps the default pipeline.
+     *
+     * @return array<int,int>
+     */
+    public static function getCampaignPipelineMap(): array
+    {
+        static $pipelineMap = null;
+
+        if ($pipelineMap === null) {
+            $configFile = __DIR__ . '/../config/campaign_pipelines.php';
+            $pipelineMap = file_exists($configFile) ? require $configFile : [];
+            if (!is_array($pipelineMap)) {
+                $pipelineMap = [];
+            }
+        }
+
+        return $pipelineMap;
+    }
+
+    /**
+     * Pipeline (CATEGORY_ID) for a deal coming from the given campaign.
+     *
+     * Uses the campaign-specific pipeline when one is configured, otherwise the default
+     * (PIPELINE in .env). Campaigns without an entry keep the existing behavior.
+     */
+    public static function resolvePipelineId(?int $idConfigCampagna, ?int $defaultPipelineId, ?array $pipelineMap = null): ?int
+    {
+        $pipelineMap = $pipelineMap ?? self::getCampaignPipelineMap();
+
+        if ($idConfigCampagna !== null && isset($pipelineMap[$idConfigCampagna])) {
+            $pipelineId = (int)$pipelineMap[$idConfigCampagna];
+            if ($pipelineId > 0) {
+                return $pipelineId;
+            }
+        }
+
+        return $defaultPipelineId;
+    }
+
+    /**
      * Get Bitrix24 custom field configuration.
      * 
      * Loads custom field IDs from config/bitrix_fields.php (or .example.php as fallback).
