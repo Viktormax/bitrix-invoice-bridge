@@ -245,6 +245,22 @@ class Bitrix24ApiClient
     }
 
     /**
+     * Update a deal in Bitrix24.
+     * 
+     * @param int $dealId Bitrix24 deal ID
+     * @param array $dealData Deal data to update
+     * @return array API response
+     * @throws \Exception If update fails
+     */
+    public function updateDeal(int $dealId, array $dealData): array
+    {
+        return $this->request('crm.deal.update', [
+            'id' => $dealId,
+            'fields' => $dealData
+        ]);
+    }
+
+    /**
      * Get contact by ID.
      */
     public function getContact(int $contactId): array
@@ -259,6 +275,38 @@ class Bitrix24ApiClient
     public function getActivity(int $activityId): array
     {
         return $this->request('crm.activity.get', ['id' => $activityId]);
+    }
+
+    /**
+     * Get the operator's actual outbound caller line (PORTAL_NUMBER) for a CRM activity.
+     *
+     * crm.activity.get does not expose which registered line/number the operator used
+     * to place the call (PROVIDER_PARAMS is empty for Voximplant softphone calls).
+     * voximplant.statistic.get, filtered by CRM_ACTIVITY_ID, returns the call statistics
+     * row for that activity, including PORTAL_NUMBER (the line actually used).
+     *
+     * Requires the 'telephony' scope on the Bitrix24 inbound webhook.
+     *
+     * @param int $activityId CRM activity ID (the call log entry)
+     * @return string|null Caller phone number as returned by Bitrix (e.g. "+393932644963"), or null if not found
+     */
+    public function getCallerPortalNumber(int $activityId): ?string
+    {
+        $result = $this->request('voximplant.statistic.get', [
+            'filter' => ['CRM_ACTIVITY_ID' => $activityId],
+        ]);
+
+        $rows = $result['result'] ?? [];
+        if (!is_array($rows) || empty($rows)) {
+            return null;
+        }
+
+        $portalNumber = $rows[0]['PORTAL_NUMBER'] ?? null;
+        if (empty($portalNumber)) {
+            return null;
+        }
+
+        return (string)$portalNumber;
     }
 
     /**
@@ -452,6 +500,8 @@ class Bitrix24ApiClient
         if ($idConfigCampagna !== null) {
             $campaignName = self::getCampaignName($idConfigCampagna);
             $bitrixFields['SOURCE_DESCRIPTION'] = $campaignName;
+            // Also write campaign label to dedicated string custom field.
+            $bitrixFields['UF_CRM_1773070951'] = (string)$campaignName;
         }
         
         // Map expiration date (DATA_SCADENZA) to custom field
@@ -509,9 +559,10 @@ class Bitrix24ApiClient
         if ($creationDate !== null && !empty($creationDate)) {
             $fieldId = $fieldConfig['data_inizio'] ?? null;
             if ($fieldId) {
-                // Convert to Bitrix DateTime format (YYYY-MM-DD HH:mm:ss)
-                $bitrixFields[$fieldId] = $creationDate;
-                error_log("Bitrix24ApiClient: Mapped creation_date to custom field {$fieldId} = {$creationDate} (DateTime)");
+                // Convert timezone from +03:00 to +01:00 if present
+                $normalizedDate = str_replace('+03:00', '+01:00', $creationDate);
+                $bitrixFields[$fieldId] = $normalizedDate;
+                error_log("Bitrix24ApiClient: Mapped creation_date to custom field {$fieldId} = {$normalizedDate} (DateTime, timezone normalized from +03:00 to +01:00)");
             } else {
                 error_log("Bitrix24ApiClient: WARNING - Custom field 'data_inizio' not configured in bitrix_fields.php");
             }
@@ -596,6 +647,8 @@ class Bitrix24ApiClient
         if ($idConfigCampagna !== null) {
             $campaignName = self::getCampaignName($idConfigCampagna);
             $dealFields['SOURCE_DESCRIPTION'] = $campaignName;
+            // Also write campaign label to dedicated string custom field.
+            $dealFields['UF_CRM_1773070951'] = (string)$campaignName;
         }
         
         // Store lot ID in comments
@@ -642,9 +695,10 @@ class Bitrix24ApiClient
         if ($creationDate !== null && !empty($creationDate)) {
             $fieldId = $fieldConfig['data_inizio'] ?? null;
             if ($fieldId) {
-                // Convert to Bitrix DateTime format (YYYY-MM-DD HH:mm:ss)
-                $dealFields[$fieldId] = $creationDate;
-                error_log("Bitrix24ApiClient: [DEAL] Mapped creation_date to custom field {$fieldId} = {$creationDate} (DateTime)");
+                // Convert timezone from +03:00 to +01:00 if present
+                $normalizedDate = str_replace('+03:00', '+01:00', $creationDate);
+                $dealFields[$fieldId] = $normalizedDate;
+                error_log("Bitrix24ApiClient: [DEAL] Mapped creation_date to custom field {$fieldId} = {$normalizedDate} (DateTime, timezone normalized from +03:00 to +01:00)");
             } else {
                 error_log("Bitrix24ApiClient: [DEAL] WARNING - Custom field 'data_inizio' not configured in bitrix_fields.php");
             }

@@ -24,6 +24,20 @@ use BitrixInvoiceBridge\BitrixToInvoiceWorkedMapper;
 use Dotenv\Dotenv;
 use Ramsey\Uuid\Uuid;
 
+/**
+ * Read a required env var from $_ENV / getenv.
+ *
+ * @throws \RuntimeException
+ */
+function requireEnv(string $key): string
+{
+    $val = $_ENV[$key] ?? getenv($key);
+    if (!is_string($val) || trim($val) === '') {
+        throw new \RuntimeException("Missing required env var: {$key}");
+    }
+    return trim($val);
+}
+
 // ---------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------
@@ -193,14 +207,15 @@ if ($rawBody !== '') {
 }
 
 // ---------------------------------------------------------------------
-// LOG ALL REQUESTS (before authentication) - for debugging
+// LOG ALL REQUESTS (before authentication) - for debugging (daily rotated)
 // ---------------------------------------------------------------------
 
-$bitrixWebhookLogFile = __DIR__ . '/../storage/logs/bitrix-webhook-calls.log';
-$logDir = dirname($bitrixWebhookLogFile);
-if (!is_dir($logDir)) {
-    mkdir($logDir, 0755, true);
+$bitrixWebhookLogDir = __DIR__ . '/../storage/logs/bitrix-webhook-calls';
+if (!is_dir($bitrixWebhookLogDir)) {
+    mkdir($bitrixWebhookLogDir, 0755, true);
 }
+$bitrixWebhookLogFile = $bitrixWebhookLogDir . '/' . date('Y-m-d') . '.log';
+$logDir = $bitrixWebhookLogDir;
 
 $logEntry = [
     'timestamp' => date('Y-m-d H:i:s'),
@@ -230,7 +245,8 @@ $logEntry = [
     'bitrix_auth_token_preview' => isset($decoded['auth']['application_token']) ? (substr($decoded['auth']['application_token'], 0, 6) . '***') : null,
 ];
 
-$logLine = json_encode($logEntry, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n";
+// Compact JSON to keep file size under control
+$logLine = json_encode($logEntry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
 
 // Write to dedicated log file (append mode, with locking)
 @file_put_contents($bitrixWebhookLogFile, $logLine, FILE_APPEND | LOCK_EX);
@@ -245,7 +261,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
         'rejection_reason' => 'Method Not Allowed (not POST)',
         'method' => $_SERVER['REQUEST_METHOD'] ?? 'UNKNOWN',
     ];
-    @file_put_contents($bitrixWebhookLogFile, "REJECTED: " . json_encode($rejectLog, JSON_PRETTY_PRINT) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+    @file_put_contents($bitrixWebhookLogFile, "REJECTED: " . json_encode($rejectLog) . "\n", FILE_APPEND | LOCK_EX);
     
     http_response_code(405);
     header('Content-Type: application/json');
@@ -387,18 +403,415 @@ function translateOutcome($bitrixOutcomeId): ?string
 }
 
 /**
+ * Normalize caller phone for outbound submissions to InVoice.
+ *
+ * This must be applied only to the calling number (`caller`), not to workedCode.
+ */
+function normalizeOutboundCallerPhone(string $phone): string
+{
+    // Keep digits only.
+    $digits = preg_replace('/\D+/', '', $phone) ?? '';
+
+    // Convert 0039xxxxxxxxxx -> 39xxxxxxxxxx for unified handling.
+    if (strpos($digits, '0039') === 0) {
+        $digits = substr($digits, 2);
+    }
+
+    // Convert 39xxxxxxxxxx -> xxxxxxxxxx (local format without country code).
+    if (strpos($digits, '39') === 0 && strlen($digits) > 10) {
+        $digits = substr($digits, 2);
+    }
+
+    return $digits;
+}
+
+/**
+ * Normalize date format for InVoice API (PRIMARY FORMAT).
+ * Converts to format: yyyy/mm/dd HH:mm:ss (no timezone).
+ * IMPORTANT: InVoice expects Italian time (CET/CEST), NOT UTC.
+ * This function removes timezone offset but keeps the original time WITHOUT any conversion.
+ * 
+ * @param string $dateInput Date string in various formats
+ * @return string Formatted date as yyyy/mm/dd HH:mm:ss (Italian time, no timezone)
+ */
+function normalizeDateForInvoice(string $dateInput): string
+{
+    if (empty($dateInput)) {
+        // Use current time without timezone conversion
+        return date('Y/m/d H:i:s');
+    }
+    
+    // CRITICAL: Extract date and time EXACTLY as provided, NO timezone conversion
+    // Remove timezone offset if present (e.g., "+03:00", "-05:00", or "Z")
+    // but keep the exact time values as they appear in the string
+    $dateInputCleaned = preg_replace('/[+-]\d{2}:\d{2}$/', '', $dateInput);
+    $dateInputCleaned = preg_replace('/Z$/', '', $dateInputCleaned);
+    
+    // Extract date and time parts directly (NO DateTime parsing to avoid any timezone conversion)
+    if (preg_match('/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/', $dateInputCleaned, $matches)) {
+        // Direct extraction: YYYY-MM-DD HH:mm:ss -> yyyy/mm/dd HH:mm:ss
+        // Keep the exact hour, minute, second as they appear in the original string
+        $year = $matches[1];
+        $month = $matches[2];
+        $day = $matches[3];
+        $hour = $matches[4];
+        $minute = $matches[5];
+        $second = $matches[6];
+        
+        // Return in format yyyy/mm/dd HH:mm:ss (exact time, no conversion)
+        return "{$year}/{$month}/{$day} {$hour}:{$minute}:{$second}";
+    }
+    
+    // Fallback: try other formats
+    if (preg_match('/^(\d{4})\/(\d{2})\/(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/', $dateInputCleaned, $matches)) {
+        // Already in yyyy/mm/dd format
+        return "{$matches[1]}/{$matches[2]}/{$matches[3]} {$matches[4]}:{$matches[5]}:{$matches[6]}";
+    }
+    
+    // Last resort: use current time without timezone conversion
+    error_log("BitrixWebhook: Failed to parse date '{$dateInput}', using current time");
+    return date('Y/m/d H:i:s');
+}
+
+/**
+ * Convert date to alternative format for InVoice API retry (FALLBACK FORMAT).
+ * Converts to format: yyyy/MM/dd HH:mm:ss (no timezone).
+ * IMPORTANT: Extracts time directly without any timezone conversion.
+ * 
+ * @param string $dateInput Date string in various formats
+ * @return string Formatted date as yyyy/MM/dd HH:mm:ss (Italian time, no timezone)
+ */
+function normalizeDateForInvoiceAlternative(string $dateInput): string
+{
+    if (empty($dateInput)) {
+        // Use current time without timezone conversion
+        return date('Y/m/d H:i:s');
+    }
+    
+    // CRITICAL: Extract date and time EXACTLY as provided, NO timezone conversion
+    // Remove timezone offset if present (e.g., "+03:00", "-05:00", or "Z")
+    // but keep the exact time values as they appear in the string
+    $dateInputCleaned = preg_replace('/[+-]\d{2}:\d{2}$/', '', $dateInput);
+    $dateInputCleaned = preg_replace('/Z$/', '', $dateInputCleaned);
+    
+    // Extract date and time parts directly (NO DateTime parsing to avoid any timezone conversion)
+    if (preg_match('/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/', $dateInputCleaned, $matches)) {
+        // Direct extraction: YYYY-MM-DD HH:mm:ss -> yyyy/MM/dd HH:mm:ss
+        // Keep the exact hour, minute, second as they appear in the original string
+        $year = $matches[1];
+        $month = $matches[2];
+        $day = $matches[3];
+        $hour = $matches[4];
+        $minute = $matches[5];
+        $second = $matches[6];
+        
+        // Return in format yyyy/MM/dd HH:mm:ss (exact time, no conversion)
+        return "{$year}/{$month}/{$day} {$hour}:{$minute}:{$second}";
+    }
+    
+    // Fallback: try other formats
+    if (preg_match('/^(\d{4})\/(\d{2})\/(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/', $dateInputCleaned, $matches)) {
+        // Already in yyyy/MM/dd format
+        return "{$matches[1]}/{$matches[2]}/{$matches[3]} {$matches[4]}:{$matches[5]}:{$matches[6]}";
+    }
+    
+    // Last resort: use current time without timezone conversion
+    error_log("BitrixWebhook: Failed to parse date (alternative format) '{$dateInput}', using current time");
+    return date('Y/m/d H:i:s');
+}
+
+/**
+ * Valida e corregge END_TIME per chiamate outbound
+ * 
+ * @param string $startTime Orario di inizio chiamata (formato: 'Y-m-d H:i:s' o DateTime)
+ * @param string|null $endTime Orario di fine chiamata da Bitrix (END_TIME) - può essere null
+ * @param string $timezone Fuso orario (default: 'Europe/Rome')
+ * @return array ['start_time' => DateTime, 'end_time' => DateTime|null, 'corrected' => bool, 'diff_minutes' => float]
+ */
+function validateAndCorrectCallTimes($startTime, $endTime = null, $timezone = 'Europe/Rome') {
+    try {
+        $tz = new \DateTimeZone($timezone);
+        
+        // Converti START_TIME in DateTime
+        if ($startTime instanceof \DateTime) {
+            $start = clone $startTime;
+            $start->setTimezone($tz);
+        } else {
+            $start = new \DateTime($startTime, $tz);
+        }
+        
+        // CORREZIONE: Bitrix invia orari con 2 ore in avanti, sottrai 2 ore
+        $start->modify('-2 hours');
+        
+        // Se END_TIME è null o vuoto, usa START_TIME
+        if (empty($endTime)) {
+            return [
+                'start_time' => $start,
+                'end_time' => clone $start,
+                'corrected' => false,
+                'diff_minutes' => 0.0
+            ];
+        }
+        
+        // Converti END_TIME in DateTime
+        if ($endTime instanceof \DateTime) {
+            $end = clone $endTime;
+            $end->setTimezone($tz);
+        } else {
+            $end = new \DateTime($endTime, $tz);
+        }
+        
+        // CORREZIONE: Bitrix invia orari con 2 ore in avanti, sottrai 2 ore
+        $end->modify('-2 hours');
+        
+        // Calcola la differenza in minuti
+        $diff = $end->getTimestamp() - $start->getTimestamp();
+        $diffMinutes = $diff / 60.0;
+        
+        // Se la differenza è maggiore di 60 minuti, correggi mantenendo i minuti originali
+        if ($diffMinutes > 60.0) {
+            // Mantieni i minuti e secondi di END_TIME, ma imposta l'ora a START_TIME + 1 ora
+            $correctedEnd = clone $start;
+            $correctedEnd->modify('+1 hour');
+            
+            // Copia minuti e secondi da END_TIME originale
+            $originalMinutes = (int)$end->format('i');
+            $originalSeconds = (int)$end->format('s');
+            $correctedEnd->setTime((int)$correctedEnd->format('H'), $originalMinutes, $originalSeconds);
+            
+            error_log("BitrixWebhook: END_TIME corretto - differenza originale: {$diffMinutes} minuti, ora impostato a START_TIME + 1 ora con minuti originali ({$originalMinutes}:{$originalSeconds})");
+            
+            return [
+                'start_time' => $start,
+                'end_time' => $correctedEnd,
+                'corrected' => true,
+                'diff_minutes' => $diffMinutes
+            ];
+        }
+        
+        // Se la differenza è negativa (END_TIME prima di START_TIME), usa START_TIME
+        if ($diffMinutes < 0) {
+            error_log("BitrixWebhook: END_TIME è precedente a START_TIME, uso START_TIME come END_TIME");
+            return [
+                'start_time' => $start,
+                'end_time' => clone $start,
+                'corrected' => true,
+                'diff_minutes' => $diffMinutes
+            ];
+        }
+        
+        // Tutto ok, ritorna i tempi originali
+        return [
+            'start_time' => $start,
+            'end_time' => $end,
+            'corrected' => false,
+            'diff_minutes' => $diffMinutes
+        ];
+        
+    } catch (\Exception $e) {
+        error_log("BitrixWebhook: Errore nella validazione dei tempi: " . $e->getMessage());
+        // In caso di errore, usa il timestamp corrente come fallback
+        $tz = new \DateTimeZone($timezone);
+        $now = new \DateTime('now', $tz);
+        return [
+            'start_time' => $now,
+            'end_time' => clone $now,
+            'corrected' => false,
+            'diff_minutes' => 0.0
+        ];
+    }
+}
+
+/**
+ * Calculate next value for custom field UF_CRM_1762188692.
+ * 
+ * Mapping logic:
+ * null → 773
+ * 773 → 775
+ * 775 → 777
+ * 777 → 779
+ * 779 → 781
+ * 781 → 783
+ * 783 → 785
+ * 785 → 787
+ * 787 → stop (return null, don't update)
+ * 
+ * @param mixed $currentValue Current value of the field (can be null, empty, or integer)
+ * @return int|null Next value to set, or null if should stop (787 or unknown value)
+ */
+function calculateNextCustomFieldValue($currentValue): ?int
+{
+    // Normalize current value: convert to integer or null
+    $current = null;
+    if ($currentValue !== null && $currentValue !== '' && $currentValue !== '0') {
+        $current = (int)$currentValue;
+    }
+    
+    // Mapping logic
+    $mapping = [
+        null => 773,
+        773 => 775,
+        775 => 777,
+        777 => 779,
+        779 => 781,
+        781 => 783,
+        783 => 785,
+        785 => 787,
+        // 787 → stop (return null)
+    ];
+    
+    return $mapping[$current] ?? null;
+}
+
+/**
+ * Send alert email when outcome is not found after all polling attempts.
+ * 
+ * @param string $requestId Request ID
+ * @param int $dealId Deal ID
+ * @param string $activityId Activity ID
+ * @param string|null $invoiceIdAnagrafica InVoice anagrafica ID
+ * @param string|null $invoiceIdCampagna InVoice campaign ID
+ * @param array $pollResult Polling result
+ * @return void
+ * @throws \Exception If email sending fails
+ */
+function sendAlertEmail(string $requestId, int $dealId, string $activityId, ?string $invoiceIdAnagrafica, ?string $invoiceIdCampagna, array $pollResult): void
+{
+    $alertMail = $_ENV['ALERT_MAIL'] ?? getenv('ALERT_MAIL');
+    
+    if (empty($alertMail)) {
+        error_log("BitrixWebhook [{$requestId}]: ALERT_MAIL not configured, cannot send alert email");
+        throw new \Exception('ALERT_MAIL not configured in .env');
+    }
+    
+    $subject = "[Bitrix-InVoice Bridge] Outcome not found after polling - Deal #{$dealId}";
+    
+    $body = "ALERT: Outcome not found after all polling attempts\n\n";
+    $body .= "Request ID: {$requestId}\n";
+    $body .= "Deal ID: {$dealId}\n";
+    $body .= "Activity ID: {$activityId}\n";
+    $body .= "InVoice Anagrafica ID: " . ($invoiceIdAnagrafica ?? 'N/A') . "\n";
+    $body .= "InVoice Campaign ID: " . ($invoiceIdCampagna ?? 'N/A') . "\n";
+    $body .= "Initial Outcome: " . ($pollResult['initial_outcome'] ?? 'empty') . "\n";
+    $body .= "Final Outcome: " . ($pollResult['final_outcome'] ?? 'empty') . "\n";
+    $body .= "Polling Attempts: {$pollResult['attempts']}\n";
+    $body .= "Outcome Changed: " . ($pollResult['changed'] ? 'Yes' : 'No') . "\n";
+    $body .= "Timestamp: " . date('Y-m-d H:i:s') . "\n\n";
+    $body .= "The system attempted to poll the deal outcome 6 times with increasing intervals (60s, 120s, 240s, 480s, 960s, 1920s),\n";
+    $body .= "but no valid outcome was found. Manual intervention may be required.\n\n";
+    $body .= "Please check the deal in Bitrix24 and verify the outcome field (UF_CRM_1761843804).\n";
+    
+    $headers = [
+        'From: Bitrix-InVoice Bridge <noreply@' . ($_SERVER['HTTP_HOST'] ?? 'localhost') . '>',
+        'Reply-To: noreply@' . ($_SERVER['HTTP_HOST'] ?? 'localhost'),
+        'X-Mailer: PHP/' . phpversion(),
+        'Content-Type: text/plain; charset=UTF-8',
+    ];
+    
+    $success = mail($alertMail, $subject, $body, implode("\r\n", $headers));
+    
+    if (!$success) {
+        throw new \Exception('Failed to send alert email (mail() returned false)');
+    }
+    
+    error_log("BitrixWebhook [{$requestId}]: Alert email sent to {$alertMail}");
+}
+
+/**
+ * Update deal custom field UF_CRM_1762188692 in background.
+ * 
+ * @param Bitrix24ApiClient $bitrix Bitrix API client
+ * @param int $dealId Deal ID
+ * @param string $requestId Request ID for logging
+ * @return void
+ */
+function updateDealCustomField(Bitrix24ApiClient $bitrix, int $dealId, string $requestId): void
+{
+    $customFieldId = 'UF_CRM_1762188692';
+    $logDir = __DIR__ . '/../storage/logs/bitrix-deal-update';
+    if (!is_dir($logDir)) {
+        mkdir($logDir, 0755, true);
+    }
+    $logFile = $logDir . '/' . date('Y-m-d') . '.log';
+    
+    $updateLog = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'request_id' => $requestId,
+        'deal_id' => $dealId,
+        'custom_field_id' => $customFieldId,
+        'step' => 'start',
+    ];
+    
+    try {
+        // Step 1: Get current deal to read current value
+        $updateLog['step'] = 'fetching_current_value';
+        $dealResponse = $bitrix->getDeal($dealId);
+        $dealData = $dealResponse['result'] ?? null;
+        
+        if (!is_array($dealData)) {
+            $updateLog['error'] = 'Failed to fetch deal data';
+            $updateLog['success'] = false;
+            @file_put_contents($logFile, json_encode($updateLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+            error_log("BitrixWebhook [{$requestId}]: Failed to fetch deal {$dealId} for custom field update");
+            return;
+        }
+        
+        $currentValue = $dealData[$customFieldId] ?? null;
+        $updateLog['current_value'] = $currentValue;
+        $updateLog['current_value_type'] = gettype($currentValue);
+        
+        // Step 2: Calculate next value
+        $updateLog['step'] = 'calculating_next_value';
+        $nextValue = calculateNextCustomFieldValue($currentValue);
+        $updateLog['next_value'] = $nextValue;
+        
+        // Step 3: Update if next value is not null (stop condition)
+        if ($nextValue === null) {
+            $updateLog['step'] = 'skipped';
+            $updateLog['reason'] = 'Next value is null (stop condition: value is 787 or unknown)';
+            $updateLog['success'] = true;
+            @file_put_contents($logFile, json_encode($updateLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+            error_log("BitrixWebhook [{$requestId}]: Skipping custom field update - next value is null (current: {$currentValue})");
+            return;
+        }
+        
+        // Step 4: Update deal with new value
+        $updateLog['step'] = 'updating_deal';
+        $updateResponse = $bitrix->updateDeal($dealId, [
+            $customFieldId => $nextValue
+        ]);
+        
+        $updateLog['update_response'] = $updateResponse;
+        $updateLog['step'] = 'completed';
+        $updateLog['success'] = true;
+        
+        error_log("BitrixWebhook [{$requestId}]: Successfully updated deal {$dealId} custom field {$customFieldId}: {$currentValue} → {$nextValue}");
+        
+    } catch (\Exception $e) {
+        $updateLog['step'] = 'error';
+        $updateLog['error'] = $e->getMessage();
+        $updateLog['trace'] = $e->getTraceAsString();
+        $updateLog['success'] = false;
+        error_log("BitrixWebhook [{$requestId}]: Error updating deal {$dealId} custom field: " . $e->getMessage());
+    }
+    
+    // Write log
+    @file_put_contents($logFile, json_encode($updateLog, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n" . str_repeat('=', 100) . "\n\n", FILE_APPEND | LOCK_EX);
+}
+
+/**
  * Poll deal outcome field for changes.
  * 
  * @param Bitrix24ApiClient $bitrix Bitrix API client
  * @param int $dealId Deal ID
  * @param string $esitoFieldId Custom field ID for outcome
  * @param mixed $initialOutcome Initial outcome value
- * @param int $maxAttempts Maximum polling attempts (default: 2)
- * @param int $delay Delay between attempts in seconds (default: 60)
- * @return array ['outcome' => mixed, 'changed' => bool, 'attempts' => int]
+ * @param array $delays Array of delays in seconds between attempts (e.g., [60, 120, 240, 480, 960, 1920])
+ * @return array ['outcome' => mixed, 'changed' => bool, 'attempts' => int, 'final_outcome' => mixed]
  */
-function pollDealOutcome(Bitrix24ApiClient $bitrix, int $dealId, string $esitoFieldId, $initialOutcome, int $maxAttempts = 2, int $delay = 60): array
+function pollDealOutcome(Bitrix24ApiClient $bitrix, int $dealId, string $esitoFieldId, $initialOutcome, array $delays): array
 {
+    $maxAttempts = count($delays);
     $pollLog = [
         'initial_outcome' => $initialOutcome,
         'attempts' => 0,
@@ -408,6 +821,8 @@ function pollDealOutcome(Bitrix24ApiClient $bitrix, int $dealId, string $esitoFi
     
     for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
         $pollLog['attempts'] = $attempt;
+        $delay = $delays[$attempt - 1] ?? 60; // Default to 60 if delay not specified
+        
         $pollLog['attempt_' . $attempt] = [
             'timestamp' => date('Y-m-d H:i:s'),
             'sleep_before' => $delay,
@@ -433,13 +848,13 @@ function pollDealOutcome(Bitrix24ApiClient $bitrix, int $dealId, string $esitoFi
             $pollLog['attempt_' . $attempt]['outcome'] = $currentOutcome;
             $pollLog['attempt_' . $attempt]['outcome_changed'] = ($currentOutcome !== $initialOutcome);
             
-            // Check if outcome changed
+            // Check if outcome changed (and is not empty)
             if ($currentOutcome !== $initialOutcome && $currentOutcome !== null && $currentOutcome !== '') {
                 $pollLog['changed'] = true;
                 $pollLog['final_outcome'] = $currentOutcome;
                 $pollLog['changed_at_attempt'] = $attempt;
                 error_log("BitrixWebhook: Outcome changed at attempt {$attempt}: {$initialOutcome} -> {$currentOutcome}");
-                break;
+                break; // Stop polling if outcome found
             }
             
         } catch (\Exception $e) {
@@ -448,7 +863,10 @@ function pollDealOutcome(Bitrix24ApiClient $bitrix, int $dealId, string $esitoFi
         }
     }
     
-    $pollLog['final_outcome'] = $pollLog['changed'] ? $pollLog['final_outcome'] : $initialOutcome;
+    // If no change detected, keep initial outcome
+    if (!$pollLog['changed']) {
+        $pollLog['final_outcome'] = $initialOutcome;
+    }
     
     return $pollLog;
 }
@@ -465,16 +883,22 @@ $response = [
 ];
 
 // Dedicated log file for Bitrix data retrieval
-$bitrixDataLogFile = __DIR__ . '/../storage/logs/bitrix-data-retrieval.log';
-$dataLogDir = dirname($bitrixDataLogFile);
+$dataLogDir = __DIR__ . '/../storage/logs/bitrix-data-retrieval';
 if (!is_dir($dataLogDir)) {
     mkdir($dataLogDir, 0755, true);
 }
+$bitrixDataLogFile = $dataLogDir . '/' . date('Y-m-d') . '.log';
+
+// Capture timestamp at first check (when webhook arrives)
+$firstCheckTimestamp = time();
+$firstCheckDateTime = date('Y-m-d H:i:s', $firstCheckTimestamp);
 
 $dataLog = [
-    'timestamp' => date('Y-m-d H:i:s'),
+    'timestamp' => $firstCheckDateTime,
     'request_id' => $requestId,
     'step' => 'start',
+    'first_check_timestamp' => $firstCheckTimestamp,
+    'first_check_datetime' => $firstCheckDateTime,
 ];
 
 try {
@@ -679,6 +1103,20 @@ try {
         exit;
     }
     
+    // Pipeline matches: update custom field UF_CRM_1762188692 ONCE (only on first webhook call, not during polling)
+    // This is executed immediately when the webhook arrives, before responding to Bitrix
+    $dataLog['step'] = 'pipeline_match_confirmed';
+    $dataLog['custom_field_update_started'] = true;
+    
+    try {
+        updateDealCustomField($bitrix, $dealId, $requestId);
+        $dataLog['custom_field_update_completed'] = true;
+    } catch (\Exception $e) {
+        $dataLog['custom_field_update_error'] = $e->getMessage();
+        error_log("BitrixWebhook [{$requestId}]: Error updating custom field: " . $e->getMessage());
+        // Don't stop processing if custom field update fails
+    }
+    
     // Step 4: Extract InVoice custom fields (ID Anagrafica Invoice and ID Campagna Invoice)
     $dataLog['step'] = 'extracting_invoice_fields';
     $fieldConfig = Bitrix24ApiClient::getBitrixFieldConfig();
@@ -720,6 +1158,15 @@ try {
     $activityTypeId = $activityData['TYPE_ID'] ?? null;
     $activityDirection = $activityData['DIRECTION'] ?? null;
     
+    // Extract START_TIME and END_TIME from Bitrix activity for call duration validation
+    // Bitrix may provide these fields in various formats (START_TIME, END_TIME, CREATED, COMPLETED)
+    $bitrixStartTime = $activityData['START_TIME'] ?? $activityData['CREATED'] ?? null;
+    $bitrixEndTime = $activityData['END_TIME'] ?? $activityData['COMPLETED'] ?? null;
+    
+    // Store in globals for use in background processing (polling phase)
+    $GLOBALS['_BITRIX_START_TIME'] = $bitrixStartTime;
+    $GLOBALS['_BITRIX_END_TIME'] = $bitrixEndTime;
+    
     // Deal status
     $dealStageId = $dealData['STAGE_ID'] ?? null;
     $dealTitle = $dealData['TITLE'] ?? null;
@@ -758,6 +1205,9 @@ try {
         'ready_for_invoice' => !empty($invoiceIdAnagrafica) && !empty($invoiceIdCampagna) && ($pipelineActivity === null || $dealCategoryId === $pipelineActivity),
     ];
     
+    // Store activity_id in dataLog for use in background processing
+    $dataLog['activity_id'] = $activityId;
+    
     $dataLog['step'] = 'ready_for_polling';
     $dataLog['success'] = true;
     
@@ -793,6 +1243,9 @@ if (function_exists('fastcgi_finish_request')) {
 // ---------------------------------------------------------------------
 // Background processing: Poll outcome and send to InVoice
 // ---------------------------------------------------------------------
+// NOTE: Custom field update is done BEFORE this point (when webhook arrives),
+// so it's executed only once per activity, not during polling
+// ---------------------------------------------------------------------
 
 // Only proceed if we have all required data
 if (isset($dataLog['success']) && $dataLog['success'] === true && 
@@ -810,9 +1263,11 @@ if (isset($dataLog['success']) && $dataLog['success'] === true &&
     ];
     
     try {
-        // Poll for outcome changes
-        $pollResult = pollDealOutcome($bitrix, $dealId, $esitoFieldId, $initialOutcome, 2, 60);
+        // Poll for outcome changes with exponential backoff: 60, 120, 240, 480, 960, 1920 seconds
+        $pollDelays = [60, 120, 240, 480, 960, 1920]; // 6 attempts with doubling intervals
+        $pollResult = pollDealOutcome($bitrix, $dealId, $esitoFieldId, $initialOutcome, $pollDelays);
         $pollLog['poll_result'] = $pollResult;
+        $pollLog['poll_delays_used'] = $pollDelays;
         
         // Determine final outcome to use
         $finalOutcome = $pollResult['final_outcome'];
@@ -829,6 +1284,20 @@ if (isset($dataLog['success']) && $dataLog['success'] === true &&
             $pollLog['note'] = 'No outcome value to translate. Activity may not have been completed yet.';
             $pollLog['skipped'] = true;
             error_log("BitrixWebhook [{$requestId}]: Skipping InVoice submission - outcome is empty");
+            
+            // After 6 attempts, if still no outcome, send alert email
+            if ($pollResult['attempts'] >= 6) {
+                $pollLog['step'] = 'sending_alert_email';
+                try {
+                    // Get activity_id from dataLog (stored before background processing)
+                    $activityIdForAlert = $dataLog['activity_id'] ?? $dataLog['summary']['activity_id'] ?? 'unknown';
+                    sendAlertEmail($requestId, $dealId, $activityIdForAlert, $invoiceIdAnagrafica, $invoiceIdCampagna, $pollResult);
+                    $pollLog['alert_email_sent'] = true;
+                } catch (\Exception $e) {
+                    $pollLog['alert_email_error'] = $e->getMessage();
+                    error_log("BitrixWebhook [{$requestId}]: Failed to send alert email: " . $e->getMessage());
+                }
+            }
         } else {
             $invoiceResultCode = translateOutcome($finalOutcome);
             $pollLog['translation'] = [
@@ -847,12 +1316,113 @@ if (isset($dataLog['success']) && $dataLog['success'] === true &&
             // Build worked payload and send to InVoice
             $pollLog['step'] = 'building_invoice_payload';
             
-            // Get activity dates (use current time if not available)
-            $workedDate = $activityData['CREATED'] ?? date('Y-m-d H:i:s');
-            $workedEndDate = $activityData['END_TIME'] ?? date('Y-m-d H:i:s');
+            // Extract and validate call times from Bitrix activity data
+            $bitrixStartTime = $GLOBALS['_BITRIX_START_TIME'] ?? null;
+            $bitrixEndTime = $GLOBALS['_BITRIX_END_TIME'] ?? null;
             
-            // Get caller (from activity or use default)
-            $caller = $activityData['SUBJECT'] ?? 'SYSTEM';
+            // Use validated times if available, otherwise fallback to first check timestamp
+            if (!empty($bitrixStartTime)) {
+                // Validate and correct call times (ensures END_TIME is not more than 1 hour after START_TIME)
+                $validatedTimes = validateAndCorrectCallTimes($bitrixStartTime, $bitrixEndTime, 'Europe/Rome');
+                
+                $startDateTime = $validatedTimes['start_time'];
+                $endDateTime = $validatedTimes['end_time'];
+                
+                // Format dates for Invoice API: yyyy/mm/dd HH:mm:ss (no timezone conversion, exact time)
+                $workedDate = $startDateTime->format('Y/m/d H:i:s');
+                $workedEndDate = $endDateTime ? $endDateTime->format('Y/m/d H:i:s') : $startDateTime->format('Y/m/d H:i:s');
+                
+                $pollLog['date_source'] = 'bitrix_activity';
+                $pollLog['bitrix_start_time'] = $bitrixStartTime;
+                $pollLog['bitrix_end_time'] = $bitrixEndTime;
+                $pollLog['validated_start'] = $startDateTime->format('Y-m-d H:i:s');
+                $pollLog['validated_end'] = $endDateTime ? $endDateTime->format('Y-m-d H:i:s') : null;
+                $pollLog['time_corrected'] = $validatedTimes['corrected'];
+                $pollLog['diff_minutes'] = $validatedTimes['diff_minutes'];
+            } else {
+                // Fallback: use timestamp from first check (when webhook arrived)
+                // Format: yyyy/MM/dd HH:mm:ss (no timezone conversion, exact time from first check)
+                $workedDate = date('Y/m/d H:i:s', $firstCheckTimestamp);
+                $workedEndDate = date('Y/m/d H:i:s', $firstCheckTimestamp);
+                
+                $pollLog['date_source'] = 'first_check_timestamp_fallback';
+                $pollLog['first_check_timestamp'] = $firstCheckTimestamp;
+                $pollLog['first_check_datetime'] = date('Y-m-d H:i:s', $firstCheckTimestamp);
+                $pollLog['note'] = 'Bitrix START_TIME/END_TIME not available, using webhook arrival time';
+            }
+            
+            // Caller must always be handled as STRING to preserve leading 0 (e.g. 079...).
+            // Fetch the real outbound line the operator used (PORTAL_NUMBER) via voximplant.statistic.get,
+            // linked by CRM_ACTIVITY_ID. Falls back to the fixed line only if the lookup fails or is empty
+            // (e.g. non-Voximplant calls, or telephony scope not available).
+            $callerPortalNumber = null;
+            try {
+                $callerPortalNumber = $bitrix->getCallerPortalNumber((int)$activityId);
+            } catch (\Exception $e) {
+                error_log("BitrixWebhook [{$requestId}]: Failed to fetch PORTAL_NUMBER for activity {$activityId}: " . $e->getMessage());
+            }
+
+            if ($callerPortalNumber !== null) {
+                $caller = (string) normalizeOutboundCallerPhone($callerPortalNumber);
+                $pollLog['caller_source'] = 'voximplant_portal_number';
+                $pollLog['caller_portal_number_raw'] = $callerPortalNumber;
+            } else {
+                $caller = (string) normalizeOutboundCallerPhone('0797008058');
+                $pollLog['caller_source'] = 'fixed_fallback';
+                error_log("BitrixWebhook [{$requestId}]: PORTAL_NUMBER not found for activity {$activityId}, using fixed fallback caller number");
+            }
+            $pollLog['caller_resolved'] = $caller;
+
+            // IMPORTANT: workedCode must be the contact's phone number (not the result code)
+            // According to InVoice API docs: "workedCode: il numero di telefono del contatto lavorato"
+            $contactPhone = null;
+            $contactId = $dealData['CONTACT_ID'] ?? null;
+            
+            if (!empty($contactId)) {
+                try {
+                    $contactResponse = $bitrix->getContact((int)$contactId);
+                    $contactData = $contactResponse['result'] ?? [];
+                    
+                    // Bitrix stores phone in PHONE field (can be array or string)
+                    if (isset($contactData['PHONE'])) {
+                        if (is_array($contactData['PHONE'])) {
+                            // PHONE is array of objects with VALUE field
+                            $contactPhone = $contactData['PHONE'][0]['VALUE'] ?? null;
+                        } else {
+                            $contactPhone = $contactData['PHONE'];
+                        }
+                    }
+                    
+                    // Clean phone number preserving original called-number format.
+                    if ($contactPhone) {
+                        $contactPhone = preg_replace('/[^0-9+]/', '', $contactPhone);
+                    }
+                    
+                    $pollLog['contact_fetch'] = [
+                        'contact_id' => $contactId,
+                        'phone_found' => !empty($contactPhone),
+                        'phone_raw' => $contactData['PHONE'] ?? null,
+                        'phone_cleaned' => $contactPhone,
+                    ];
+                } catch (\Exception $e) {
+                    error_log("BitrixWebhook [{$requestId}]: Failed to fetch contact {$contactId}: " . $e->getMessage());
+                    $pollLog['contact_fetch_error'] = $e->getMessage();
+                }
+            }
+            
+            // Fallback: try to extract phone from caller string or use placeholder
+            if (empty($contactPhone)) {
+                // Try to extract phone from caller string (e.g., "In uscita a +39 328 011 4601")
+                if (preg_match('/(\+?\d{10,15})/', $caller, $matches)) {
+                    $contactPhone = $matches[1];
+                    $pollLog['phone_extracted_from_caller'] = true;
+                } else {
+                    // Last resort: use placeholder (InVoice might reject this)
+                    $contactPhone = '0000000000';
+                    error_log("BitrixWebhook [{$requestId}]: WARNING - No contact phone found, using placeholder");
+                    $pollLog['phone_placeholder_used'] = true;
+                }
+            }
             
             // Get id_config_campagna for mapping
             $idConfigCampagna = $dealData[$fieldConfig['id_config_campagna'] ?? 'UF_CRM_INVOICE_CAMPAIGN_CONFIG_ID'] ?? null;
@@ -862,10 +1432,10 @@ if (isset($dataLog['success']) && $dataLog['success'] === true &&
                 'campaignId' => (int)$invoiceIdCampagna,
                 'workedDate' => $workedDate,
                 'workedEndDate' => $workedEndDate,
-                'caller' => $caller,
-                'resultCode' => $invoiceResultCode, // Use translated outcome
-                'workedCode' => $invoiceResultCode, // Use same code for workedCode
-                'workedType' => 'CALL', // Default to CALL, can be configured
+                'caller' => (string)$caller,
+                'workedCode' => $contactPhone, // PHONE NUMBER (required by InVoice API)
+                'resultCode' => $invoiceResultCode, // Outcome code (e.g., "D001")
+                'workedType' => 'O', // O = Outbound (must be O, E, V, B, or C)
             ];
             
             $pollLog['worked_input'] = $workedInput;
@@ -876,34 +1446,100 @@ if (isset($dataLog['success']) && $dataLog['success'] === true &&
             $pollLog['worked_payload'] = $workedPayload;
             
             // Initialize InVoice client
-            $invoiceBaseUrl = $_ENV['INVOICE_API_BASE_URL'] ?? getenv('INVOICE_API_BASE_URL') ?: 'https://enel.in-voice.it';
-            $invoiceClientId = $_ENV['INVOICE_CLIENT_ID'] ?? getenv('INVOICE_CLIENT_ID');
-            $invoiceJwk = $_ENV['INVOICE_JWK_JSON'] ?? getenv('INVOICE_JWK_JSON');
-            
-            if (empty($invoiceClientId) || empty($invoiceJwk)) {
-                throw new \Exception('InVoice credentials not configured');
-            }
+            $invoiceBaseUrl = requireEnv('INVOICE_API_BASE_URL');
+            $invoiceClientId = requireEnv('INVOICE_CLIENT_ID');
+            $invoiceJwk = requireEnv('INVOICE_JWK_JSON');
             
             $tokenCacheDir = __DIR__ . '/../storage/logs/invoice-token-cache';
             $invoice = new InvoiceApiClient($invoiceBaseUrl, $tokenCacheDir);
             $invoice->setCredentials($invoiceClientId, $invoiceJwk);
             
-            // Submit to InVoice
+            // Submit to InVoice (with retry using alternative date format)
+            $invoiceResponse = null;
+            $invoiceException = null;
+            $dateFormatUsed = 'primary'; // Track which format was used
+            
             try {
+                // First attempt with primary format: yyyy/mm/dd HH:mm:ss
                 $invoiceResponse = $invoice->submitWorkedContact($workedPayload);
                 $pollLog['invoice_response'] = $invoiceResponse;
+                $pollLog['date_format_used'] = 'primary (yyyy/mm/dd HH:mm:ss)';
                 $pollLog['step'] = 'completed';
                 $pollLog['success'] = true;
                 
-                error_log("BitrixWebhook [{$requestId}]: Successfully submitted to InVoice. Outcome: {$finalOutcome} -> {$invoiceResultCode}");
-            } catch (\Exception $invoiceException) {
-                // Log detailed error information
-                $pollLog['invoice_error'] = $invoiceException->getMessage();
-                $pollLog['invoice_error_trace'] = $invoiceException->getTraceAsString();
-                $pollLog['invoice_error_file'] = $invoiceException->getFile();
-                $pollLog['invoice_error_line'] = $invoiceException->getLine();
-                error_log("BitrixWebhook [{$requestId}]: InVoice submission failed: " . $invoiceException->getMessage());
-                throw $invoiceException; // Re-throw to be caught by outer catch
+                error_log("BitrixWebhook [{$requestId}]: Successfully submitted to InVoice with primary date format (yyyy/mm/dd). Outcome: {$finalOutcome} -> {$invoiceResultCode}");
+            } catch (\Exception $firstException) {
+                // Check if error might be related to date format
+                $errorMessage = $firstException->getMessage();
+                $isDateFormatError = (
+                    stripos($errorMessage, 'date') !== false ||
+                    stripos($errorMessage, 'format') !== false ||
+                    stripos($errorMessage, 'json non valido') !== false ||
+                    stripos($errorMessage, 'invalid') !== false ||
+                    stripos($errorMessage, 'data chiamata') !== false ||
+                    stripos($errorMessage, 'non valida') !== false ||
+                    stripos($errorMessage, 'non valido') !== false ||
+                    stripos($errorMessage, 'valida') !== false
+                );
+                
+                $pollLog['first_attempt_error'] = $errorMessage;
+                $pollLog['first_attempt_is_date_error'] = $isDateFormatError;
+                
+                // Retry with alternative date format if it might be a date format issue
+                if ($isDateFormatError) {
+                    error_log("BitrixWebhook [{$requestId}]: First attempt failed, retrying with alternative date format (yyyy/MM/dd HH:mm:ss)");
+                    
+                    try {
+                        // Convert dates to alternative format: dd-mm-yyyy HH:mm:ss
+                        // Use validated times if available, otherwise fallback to first check timestamp
+                        if (!empty($bitrixStartTime)) {
+                            // Use the same validated times but in alternative format (yyyy/MM/dd HH:mm:ss)
+                            $validatedTimes = validateAndCorrectCallTimes($bitrixStartTime, $bitrixEndTime, 'Europe/Rome');
+                            $startDateTime = $validatedTimes['start_time'];
+                            $endDateTime = $validatedTimes['end_time'];
+                            $workedDateAlt = $startDateTime->format('Y/m/d H:i:s');
+                            $workedEndDateAlt = $endDateTime ? $endDateTime->format('Y/m/d H:i:s') : $startDateTime->format('Y/m/d H:i:s');
+                        } else {
+                            // Fallback: use first check timestamp
+                            $workedDateAlt = date('d-m-Y H:i:s', $firstCheckTimestamp);
+                            $workedEndDateAlt = date('d-m-Y H:i:s', $firstCheckTimestamp);
+                        }
+                        
+                        // Rebuild payload with alternative date format
+                        $workedInputAlt = $workedInput;
+                        $workedInputAlt['workedDate'] = $workedDateAlt;
+                        $workedInputAlt['workedEndDate'] = $workedEndDateAlt;
+                        
+                        $workedPayloadAlt = BitrixToInvoiceWorkedMapper::buildWorkedPayload($workedInputAlt);
+                        $pollLog['worked_payload_retry'] = $workedPayloadAlt;
+                        
+                        // Retry submission
+                        $invoiceResponse = $invoice->submitWorkedContact($workedPayloadAlt);
+                        $pollLog['invoice_response'] = $invoiceResponse;
+                        $pollLog['date_format_used'] = 'alternative (yyyy/MM/dd HH:mm:ss)';
+                        $pollLog['step'] = 'completed';
+                        $pollLog['success'] = true;
+                        
+                        error_log("BitrixWebhook [{$requestId}]: Successfully submitted to InVoice with alternative date format (yyyy/MM/dd). Outcome: {$finalOutcome} -> {$invoiceResultCode}");
+                    } catch (\Exception $retryException) {
+                        // Both attempts failed
+                        $pollLog['retry_attempt_error'] = $retryException->getMessage();
+                        $pollLog['invoice_error'] = $retryException->getMessage();
+                        $pollLog['invoice_error_trace'] = $retryException->getTraceAsString();
+                        $pollLog['invoice_error_file'] = $retryException->getFile();
+                        $pollLog['invoice_error_line'] = $retryException->getLine();
+                        error_log("BitrixWebhook [{$requestId}]: Both date format attempts failed. First: {$errorMessage}. Retry: " . $retryException->getMessage());
+                        throw $retryException; // Re-throw to be caught by outer catch
+                    }
+                } else {
+                    // Not a date format error, don't retry
+                    $pollLog['invoice_error'] = $errorMessage;
+                    $pollLog['invoice_error_trace'] = $firstException->getTraceAsString();
+                    $pollLog['invoice_error_file'] = $firstException->getFile();
+                    $pollLog['invoice_error_line'] = $firstException->getLine();
+                    error_log("BitrixWebhook [{$requestId}]: InVoice submission failed (not a date format error): " . $errorMessage);
+                    throw $firstException; // Re-throw to be caught by outer catch
+                }
             }
             
         }
@@ -1073,13 +1709,26 @@ try {
     }
 
     // Build worked input - use outcome mapping if available, otherwise use explicit values
+    // Normalize dates to InVoice format: YYYY/MM/DD HH:mm:ss (no timezone)
+    $workedDateRaw = $decoded['workedDate'] ?? date('Y-m-d H:i:s');
+    $workedEndDateRaw = $decoded['workedEndDate'] ?? date('Y-m-d H:i:s');
     $workedInput = [
         'contactId' => $invoiceContactId,
         'campaignId' => $invoiceCampaignId,
-        'workedDate' => $decoded['workedDate'] ?? date('Y-m-d H:i:s'),
-        'workedEndDate' => $decoded['workedEndDate'] ?? date('Y-m-d H:i:s'),
-        'caller' => $decoded['caller'] ?? 'unknown',
+        'workedDate' => normalizeDateForInvoice($workedDateRaw),
+        'workedEndDate' => normalizeDateForInvoice($workedEndDateRaw),
+        'caller' => '0797008058', // Always fixed value
     ];
+    
+    // IMPORTANT: workedCode must be the contact's phone number (required by InVoice API)
+    // If not provided in decoded payload, we need to fetch it from Bitrix
+    if (isset($decoded['workedCode'])) {
+        $workedInput['workedCode'] = $decoded['workedCode'];
+    } else {
+        // TODO: Fetch contact phone from Bitrix if not provided
+        // For now, this will cause an error if workedCode is missing
+        error_log("BitrixWebhook [{$requestId}]: WARNING - workedCode (phone number) not provided in payload");
+    }
     
     // Add outcome mapping if available
     if ($bitrixOutcome !== null) {
@@ -1090,20 +1739,21 @@ try {
     }
     
     // Explicit values override mapping if provided
-    if (isset($decoded['workedCode'])) {
-        $workedInput['workedCode'] = $decoded['workedCode'];
-    }
     if (isset($decoded['resultCode'])) {
         $workedInput['resultCode'] = $decoded['resultCode'];
     }
+    
+    // workedType must be O, E, V, B, or C (default to O for Outbound)
     if (isset($decoded['workedType'])) {
         $workedInput['workedType'] = $decoded['workedType'];
+    } else {
+        $workedInput['workedType'] = 'O'; // Default to O (Outbound)
     }
 
     $workedPayload = BitrixToInvoiceWorkedMapper::buildWorkedPayload($workedInput);
 
     // InVoice client
-    $invoiceBaseUrl = $_ENV['INVOICE_API_BASE_URL'] ?? getenv('INVOICE_API_BASE_URL') ?: 'https://enel.in-voice.it';
+$invoiceBaseUrl = $_ENV['INVOICE_API_BASE_URL'] ?? getenv('INVOICE_API_BASE_URL');
     $invoiceClientId = $_ENV['INVOICE_CLIENT_ID'] ?? getenv('INVOICE_CLIENT_ID');
     $invoiceJwk = $_ENV['INVOICE_JWK_JSON'] ?? getenv('INVOICE_JWK_JSON');
 
@@ -1112,7 +1762,49 @@ try {
         $invoice->setCredentials((string)$invoiceClientId, (string)$invoiceJwk);
     }
 
-    $workedResult = $invoice->submitWorkedContact($workedPayload);
+    // Submit with retry using alternative date format if needed
+    $workedResult = null;
+    try {
+        // First attempt with primary format: yyyy/MM/dd HH:mm:ss
+        $workedResult = $invoice->submitWorkedContact($workedPayload);
+        error_log("BitrixWebhook [{$requestId}]: Successfully submitted to InVoice with primary date format");
+    } catch (\Exception $firstException) {
+        // Check if error might be related to date format
+        $errorMessage = $firstException->getMessage();
+        $isDateFormatError = (
+            stripos($errorMessage, 'date') !== false ||
+            stripos($errorMessage, 'format') !== false ||
+            stripos($errorMessage, 'json non valido') !== false ||
+            stripos($errorMessage, 'invalid') !== false ||
+            stripos($errorMessage, 'data chiamata') !== false ||
+            stripos($errorMessage, 'non valida') !== false ||
+            stripos($errorMessage, 'non valido') !== false ||
+            stripos($errorMessage, 'valida') !== false
+        );
+        
+        // Retry with alternative date format if it might be a date format issue
+        if ($isDateFormatError) {
+            error_log("BitrixWebhook [{$requestId}]: First attempt failed, retrying with alternative date format (dd-mm-yyyy HH:mm:ss)");
+            
+            // Convert dates to alternative format: dd-mm-yyyy HH:mm:ss (with dashes)
+            $workedDateAlt = normalizeDateForInvoiceAlternative($workedDateRaw);
+            $workedEndDateAlt = normalizeDateForInvoiceAlternative($workedEndDateRaw);
+            
+            // Rebuild payload with alternative date format
+            $workedInputAlt = $workedInput;
+            $workedInputAlt['workedDate'] = $workedDateAlt;
+            $workedInputAlt['workedEndDate'] = $workedEndDateAlt;
+            
+            $workedPayloadAlt = BitrixToInvoiceWorkedMapper::buildWorkedPayload($workedInputAlt);
+            
+            // Retry submission
+            $workedResult = $invoice->submitWorkedContact($workedPayloadAlt);
+            error_log("BitrixWebhook [{$requestId}]: Successfully submitted to InVoice with alternative date format");
+        } else {
+            // Not a date format error, re-throw
+            throw $firstException;
+        }
+    }
 
     $response['processed'] = true;
     $response['deal_id'] = $dealId;

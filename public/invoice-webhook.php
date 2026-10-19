@@ -123,6 +123,112 @@ if (!function_exists('getallheaders')) {
     }
 }
 
+/**
+ * Notify external webhook when a Bitrix deal is created.
+ *
+ * This is best-effort and must never break the main InVoice -> Bitrix flow.
+ */
+function notifyDealCreatedWebhook(string $requestId, array $payload): void
+{
+    $defaultUrl = 'https://bitrix24-twilio-middleware-771748527794.europe-west1.run.app/webhook/alert/deal';
+    $webhookUrl = $_ENV['DEAL_CREATED_ALERT_WEBHOOK_URL'] ?? getenv('DEAL_CREATED_ALERT_WEBHOOK_URL') ?: $defaultUrl;
+    $alertToken = $_ENV['DEAL_CREATED_ALERT_TOKEN'] ?? getenv('DEAL_CREATED_ALERT_TOKEN');
+
+    if (empty($webhookUrl)) {
+        error_log("Webhook [{$requestId}]: Deal-created alert webhook URL is empty, skipping notification");
+        return;
+    }
+
+    if (empty($alertToken)) {
+        error_log("Webhook [{$requestId}]: DEAL_CREATED_ALERT_TOKEN not configured, skipping deal-created notification");
+        return;
+    }
+
+    // Include token also as query parameter for compatibility with receiver.
+    $separator = (strpos($webhookUrl, '?') === false) ? '?' : '&';
+    $webhookUrlWithToken = $webhookUrl . $separator . 'token=' . rawurlencode((string) $alertToken);
+
+    $jsonPayload = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if ($jsonPayload === false) {
+        error_log("Webhook [{$requestId}]: Failed to encode deal-created webhook payload");
+        return;
+    }
+
+    $headers = [
+        'Content-Type: application/json',
+        'Accept: application/json',
+        'X-Alert-Token: ' . $alertToken,
+    ];
+
+    try {
+        if (function_exists('curl_init')) {
+            $ch = curl_init($webhookUrlWithToken);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_HTTPHEADER => $headers,
+                CURLOPT_POSTFIELDS => $jsonPayload,
+                CURLOPT_CONNECTTIMEOUT => 3,
+                CURLOPT_TIMEOUT => 5,
+            ]);
+
+            $body = curl_exec($ch);
+            $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlError = curl_error($ch);
+            curl_close($ch);
+
+            if (!empty($curlError)) {
+                error_log("Webhook [{$requestId}]: Deal-created webhook cURL error: {$curlError}");
+                return;
+            }
+
+            if ($httpCode >= 200 && $httpCode < 300) {
+                error_log("Webhook [{$requestId}]: Deal-created webhook notified successfully (HTTP {$httpCode})");
+            } else {
+                error_log("Webhook [{$requestId}]: Deal-created webhook returned HTTP {$httpCode}. Body: " . (string) $body);
+            }
+            return;
+        }
+
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => implode("\r\n", $headers),
+                'content' => $jsonPayload,
+                'timeout' => 5,
+                'ignore_errors' => true,
+            ],
+        ]);
+
+        $body = @file_get_contents($webhookUrlWithToken, false, $context);
+        $statusLine = $http_response_header[0] ?? '';
+        preg_match('/\s(\d{3})\s/', (string) $statusLine, $matches);
+        $httpCode = isset($matches[1]) ? (int) $matches[1] : 0;
+
+        if ($httpCode >= 200 && $httpCode < 300) {
+            error_log("Webhook [{$requestId}]: Deal-created webhook notified successfully (HTTP {$httpCode})");
+        } else {
+            error_log("Webhook [{$requestId}]: Deal-created webhook returned HTTP {$httpCode}. Body: " . (string) $body);
+        }
+    } catch (\Throwable $e) {
+        error_log("Webhook [{$requestId}]: Deal-created webhook notification failed: " . $e->getMessage());
+    }
+}
+
+/**
+ * Read a required env var from $_ENV / getenv.
+ *
+ * @throws \RuntimeException
+ */
+function requireEnv(string $key, string $requestId): string
+{
+    $val = $_ENV[$key] ?? getenv($key);
+    if (!is_string($val) || trim($val) === '') {
+        throw new \RuntimeException("Missing required env var: {$key}");
+    }
+    return trim($val);
+}
+
 // Load environment variables
 $envFile = __DIR__ . '/../.env';
 if (file_exists($envFile)) {
@@ -336,8 +442,12 @@ try {
         error_log("Webhook [{$requestId}]: Log error file: " . $logError->getFile() . ":" . $logError->getLine());
         error_log("Webhook [{$requestId}]: Log error trace: " . $logError->getTraceAsString());
         
-        // Also try to write to webhook_errors.log as fallback
-        $errorLogFile = __DIR__ . '/webhook_errors.log';
+        // Also try to write to webhook_errors.log as fallback (daily rotated)
+        $errorLogDir = __DIR__ . '/../storage/logs/webhook-errors';
+        if (!is_dir($errorLogDir)) {
+            @mkdir($errorLogDir, 0755, true);
+        }
+        $errorLogFile = $errorLogDir . '/' . date('Y-m-d') . '.log';
         $errorLogEntry = date('Y-m-d H:i:s') . " [{$requestId}] LOGGING ERROR\n";
         $errorLogEntry .= "Error: " . $logError->getMessage() . "\n";
         $errorLogEntry .= "File: " . $logError->getFile() . ":" . $logError->getLine() . "\n";
@@ -367,17 +477,14 @@ try {
                         
                         try {
                             // Initialize InvoiceApiClient
-                            $apiBaseUrl = $_ENV['INVOICE_API_BASE_URL'] ?? getenv('INVOICE_API_BASE_URL') ?: 'https://enel.in-voice.it';
-                            $clientId = $_ENV['INVOICE_CLIENT_ID'] ?? getenv('INVOICE_CLIENT_ID');
-                            $jwkJson = $_ENV['INVOICE_JWK_JSON'] ?? getenv('INVOICE_JWK_JSON');
+                            $apiBaseUrl = requireEnv('INVOICE_API_BASE_URL', $requestId);
+                            $clientId = requireEnv('INVOICE_CLIENT_ID', $requestId);
+                            $jwkJson = requireEnv('INVOICE_JWK_JSON', $requestId);
                             
                             error_log("Webhook [{$requestId}]: API Base URL: {$apiBaseUrl}");
                             error_log("Webhook [{$requestId}]: Client ID configured: " . (!empty($clientId) ? 'YES (length: ' . strlen($clientId) . ')' : 'NO'));
                             error_log("Webhook [{$requestId}]: JWK JSON configured: " . (!empty($jwkJson) ? 'YES (length: ' . strlen($jwkJson) . ')' : 'NO'));
-                            
-                            if (empty($clientId) || empty($jwkJson)) {
-                                throw new \Exception('OAuth2 credentials not configured (INVOICE_CLIENT_ID or INVOICE_JWK_JSON missing)');
-                            }
+                            // requireEnv already enforces presence
                             
                             // Set cache directory for token caching
                             $tokenCacheDir = $logDir . '/../invoice-token-cache';
@@ -541,6 +648,13 @@ try {
                                             // Link deal to contact
                                             $bitrixClient->linkDealToContact($bitrixDealId, (int)$bitrixEntityId);
                                             error_log("Webhook [{$requestId}]: Successfully linked deal to contact");
+
+                                            // Additional notification webhook for deal creation (best-effort).
+                                            notifyDealCreatedWebhook($requestId, [
+                                                'pipelineId' => isset($dealFields['CATEGORY_ID']) ? (int)$dealFields['CATEGORY_ID'] : null,
+                                                'dealTitle' => (string)($dealFields['TITLE'] ?? ''),
+                                                'dealId' => (string)$bitrixDealId,
+                                            ]);
                                             
                                             // Verify custom fields were saved by fetching the deal back
                                             try {
@@ -626,8 +740,12 @@ try {
                                 error_log("Webhook [{$requestId}]: BITRIX24_WEBHOOK_URL not configured, skipping Bitrix24 integration");
                             }
                             
-                            // Also write success to webhook_errors.log for debugging
-                            $errorLogFile = __DIR__ . '/webhook_errors.log';
+                            // Also write success to webhook_errors.log for debugging (daily rotated)
+                            $errorLogDir = __DIR__ . '/../storage/logs/webhook-errors';
+                            if (!is_dir($errorLogDir)) {
+                                @mkdir($errorLogDir, 0755, true);
+                            }
+                            $errorLogFile = $errorLogDir . '/' . date('Y-m-d') . '.log';
                             $successLogEntry = date('Y-m-d H:i:s') . " [{$requestId}] EVENT PROCESSING SUCCESS\n";
                             $successLogEntry .= "Lot ID: {$lotId}\n";
                             $successLogEntry .= "Lot data keys: " . implode(', ', array_keys($lotData)) . "\n";
@@ -704,8 +822,12 @@ try {
                             error_log("Webhook [{$requestId}]: Error type: " . get_class($e));
                             error_log("Webhook [{$requestId}]: Error file: " . $e->getFile() . ":" . $e->getLine());
                             
-                            // Also write to webhook_errors.log for easy debugging
-                            $errorLogFile = __DIR__ . '/webhook_errors.log';
+                            // Also write to webhook_errors.log for easy debugging (daily rotated)
+                            $errorLogDir = __DIR__ . '/../storage/logs/webhook-errors';
+                            if (!is_dir($errorLogDir)) {
+                                @mkdir($errorLogDir, 0755, true);
+                            }
+                            $errorLogFile = $errorLogDir . '/' . date('Y-m-d') . '.log';
                             $errorLogEntry = date('Y-m-d H:i:s') . " [{$requestId}] EVENT PROCESSING ERROR\n";
                             $errorLogEntry .= "Lot ID: {$lotId}\n";
                             $errorLogEntry .= "Error: " . $e->getMessage() . "\n";
@@ -772,8 +894,12 @@ try {
     ];
     error_log("Webhook error [{$requestId}]: " . json_encode($errorDetails, JSON_UNESCAPED_SLASHES));
     
-    // Also write to a separate error log file (accessible via web for debugging)
-    $errorLogFile = __DIR__ . '/webhook_errors.log';
+    // Also write to a separate error log file (daily rotated)
+    $errorLogDir = __DIR__ . '/../storage/logs/webhook-errors';
+    if (!is_dir($errorLogDir)) {
+        @mkdir($errorLogDir, 0755, true);
+    }
+    $errorLogFile = $errorLogDir . '/' . date('Y-m-d') . '.log';
     $errorLogEntry = date('Y-m-d H:i:s') . " [{$requestId}]\n";
     $errorLogEntry .= "Error: " . $e->getMessage() . "\n";
     $errorLogEntry .= "File: " . $e->getFile() . ":" . $e->getLine() . "\n";

@@ -16,7 +16,7 @@ class InvoiceApiClient
     private ?string $tokenCacheFile = null;
     private int $tokenExpiresAt = 0;
 
-    public function __construct(string $baseUrl = 'https://enel.in-voice.it', ?string $tokenCacheDir = null)
+    public function __construct(string $baseUrl, ?string $tokenCacheDir = null)
     {
         $this->baseUrl = rtrim($baseUrl, '/');
         

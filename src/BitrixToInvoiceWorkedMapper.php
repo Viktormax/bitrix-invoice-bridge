@@ -84,52 +84,60 @@ class BitrixToInvoiceWorkedMapper
      * - contactId: InVoice ID_ANAGRAFICA (string/int)
      * - campaignId: InVoice campaign id_campagna (string/int)
      * - caller: operator identifier / phone (string)
-     * - bitrixOutcome: (optional) Bitrix activity outcome - if provided, will be mapped to workedCode/resultCode
+     * - workedCode: CONTACT PHONE NUMBER (required by InVoice API - "il numero di telefono del contatto lavorato")
+     * - bitrixOutcome: (optional) Bitrix activity outcome - if provided, will be mapped to resultCode/workedType
      * - idConfigCampagna: (optional) Campaign configuration ID for outcome mapping
      *
-     * If bitrixOutcome is provided and mapping exists, it will override workedCode/resultCode/workedType.
-     * Otherwise, workedCode, resultCode, and workedType must be provided explicitly.
+     * IMPORTANT: According to InVoice API documentation:
+     * - workedCode: MUST be the contact's phone number (NOT the result code)
+     * - resultCode: the outcome code (e.g., "D001", "D003")
+     * - workedType: must be O, E, V, B, or C (single letter)
+     *
+     * If bitrixOutcome is provided and mapping exists, it will override resultCode/workedType.
+     * workedCode MUST be provided explicitly (it's the phone number).
      *
      * @throws \InvalidArgumentException
      */
     public static function buildWorkedPayload(array $input): array
     {
-        // Try to map Bitrix outcome if provided
+        // Try to map Bitrix outcome if provided (only for resultCode and workedType, NOT workedCode)
         $mappedOutcome = null;
         if (isset($input['bitrixOutcome'])) {
             $idConfigCampagna = isset($input['idConfigCampagna']) ? (int)$input['idConfigCampagna'] : null;
             $mappedOutcome = self::mapBitrixOutcomeToInvoice($input['bitrixOutcome'], $idConfigCampagna);
             
             if ($mappedOutcome) {
-                error_log("BitrixToInvoiceWorkedMapper: Mapped Bitrix outcome '{$input['bitrixOutcome']}' to workedCode={$mappedOutcome['workedCode']}, resultCode={$mappedOutcome['resultCode']}, workedType={$mappedOutcome['workedType']}");
+                error_log("BitrixToInvoiceWorkedMapper: Mapped Bitrix outcome '{$input['bitrixOutcome']}' to resultCode={$mappedOutcome['resultCode']}, workedType={$mappedOutcome['workedType']}");
             } else {
                 error_log("BitrixToInvoiceWorkedMapper: WARNING - No mapping found for Bitrix outcome '{$input['bitrixOutcome']}' (id_config_campagna: " . ($idConfigCampagna ?? 'null') . "). Using explicit values if provided.");
             }
         }
         
-        // Use mapped values if available, otherwise require explicit values
-        $workedCode = $mappedOutcome['workedCode'] ?? $input['workedCode'] ?? null;
+        // workedCode MUST be the phone number (from input, never from mapping)
+        $workedCode = $input['workedCode'] ?? null;
+        
+        // Use mapped values for resultCode and workedType if available, otherwise require explicit values
         $resultCode = $mappedOutcome['resultCode'] ?? $input['resultCode'] ?? null;
         $workedType = $mappedOutcome['workedType'] ?? $input['workedType'] ?? null;
         
-        $required = ['contactId', 'campaignId', 'workedDate', 'workedEndDate', 'caller'];
+        $required = ['contactId', 'campaignId', 'workedDate', 'workedEndDate', 'caller', 'workedCode'];
         foreach ($required as $key) {
             if (!isset($input[$key]) || $input[$key] === '' || $input[$key] === null) {
                 throw new \InvalidArgumentException("Missing required field: {$key}");
             }
         }
         
-        if ($workedCode === null || $resultCode === null || $workedType === null) {
-            throw new \InvalidArgumentException("Missing workedCode, resultCode, or workedType. Either provide bitrixOutcome with valid mapping in result_codes.php, or provide explicit values.");
+        if ($resultCode === null || $workedType === null) {
+            throw new \InvalidArgumentException("Missing resultCode or workedType. Either provide bitrixOutcome with valid mapping in result_codes.php, or provide explicit values.");
         }
 
         return [
-            'workedCode' => (string)$workedCode,
+            'workedCode' => (string)$workedCode, // Phone number (required by InVoice API)
             'workedDate' => (string)$input['workedDate'],
             'workedEndDate' => (string)$input['workedEndDate'],
-            'resultCode' => (string)$resultCode,
+            'resultCode' => (string)$resultCode, // Outcome code
             'caller' => (string)$input['caller'],
-            'workedType' => (string)$workedType,
+            'workedType' => (string)$workedType, // Must be O, E, V, B, or C
             'campaignId' => (int)$input['campaignId'],
             'contactId' => (int)$input['contactId'],
         ];
