@@ -378,6 +378,68 @@ class Bitrix24ApiClient
     }
 
     /**
+     * Rule for routing leads by a field of the lead itself (config/lead_field_pipelines.php).
+     *
+     * Used with the In.Voice widget "extra params" (ivGetExtraParams in the landing page):
+     * the landing sends a value in a campaign field and it comes back in the lead data.
+     *
+     * @return array{field: string, map: array<string,int>} Empty field = rule disabled
+     */
+    public static function getLeadFieldPipelineRule(): array
+    {
+        static $rule = null;
+
+        if ($rule === null) {
+            $configFile = __DIR__ . '/../config/lead_field_pipelines.php';
+            $loaded = file_exists($configFile) ? require $configFile : [];
+            $rule = [
+                'field' => is_array($loaded) ? trim((string)($loaded['field'] ?? '')) : '',
+                'map' => is_array($loaded) && is_array($loaded['map'] ?? null) ? $loaded['map'] : [],
+            ];
+        }
+
+        return $rule;
+    }
+
+    /**
+     * Pipeline (CATEGORY_ID) for one lead.
+     *
+     * 1. value of the configured lead field (e.g. the landing page), if it is in the map;
+     * 2. otherwise the campaign map (resolvePipelineId);
+     * 3. otherwise the default pipeline (PIPELINE in .env).
+     * Field name and value are matched case-insensitively, ignoring surrounding spaces.
+     */
+    public static function resolvePipelineForLead(
+        array $lead,
+        ?int $idConfigCampagna,
+        ?int $defaultPipelineId,
+        ?array $fieldRule = null,
+        ?array $campaignMap = null
+    ): ?int {
+        $fieldRule = $fieldRule ?? self::getLeadFieldPipelineRule();
+        $field = strtolower(trim((string)($fieldRule['field'] ?? '')));
+
+        if ($field !== '') {
+            $value = null;
+            foreach ($lead as $key => $v) {
+                if (strtolower(trim((string)$key)) === $field) {
+                    $value = strtolower(trim((string)$v));
+                    break;
+                }
+            }
+            if ($value !== null && $value !== '') {
+                foreach (($fieldRule['map'] ?? []) as $mapValue => $pipelineId) {
+                    if (strtolower(trim((string)$mapValue)) === $value && (int)$pipelineId > 0) {
+                        return (int)$pipelineId;
+                    }
+                }
+            }
+        }
+
+        return self::resolvePipelineId($idConfigCampagna, $defaultPipelineId, $campaignMap);
+    }
+
+    /**
      * Get Bitrix24 custom field configuration.
      * 
      * Loads custom field IDs from config/bitrix_fields.php (or .example.php as fallback).

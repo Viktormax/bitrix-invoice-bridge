@@ -531,10 +531,12 @@ try {
                             $idCampagna = isset($slice['id_campagna']) ? (int)$slice['id_campagna'] : null;
                             $creationDate = isset($slice['creation_date']) ? $slice['creation_date'] : null;
                             
-                            // Campaign-specific pipeline (config/campaign_pipelines.php); default stays PIPELINE from .env
-                            $resolvedPipelineId = Bitrix24ApiClient::resolvePipelineId($idConfigCampagna, $pipelineId);
+                            // Pipeline per lead: campo del lead (es. landing, config/lead_field_pipelines.php),
+                            // poi per campagna (config/campaign_pipelines.php); default PIPELINE dal .env
+                            $firstLead = (is_array($lotData) && isset($lotData[0]) && is_array($lotData[0])) ? $lotData[0] : [];
+                            $resolvedPipelineId = Bitrix24ApiClient::resolvePipelineForLead($firstLead, $idConfigCampagna, $pipelineId);
                             if ($resolvedPipelineId !== $pipelineId) {
-                                error_log("Webhook [{$requestId}]: Pipeline override for campaign {$idConfigCampagna}: {$pipelineId} -> {$resolvedPipelineId}");
+                                error_log("Webhook [{$requestId}]: Pipeline override (campaign {$idConfigCampagna}): {$pipelineId} -> {$resolvedPipelineId}");
                                 $pipelineId = $resolvedPipelineId;
                             }
 

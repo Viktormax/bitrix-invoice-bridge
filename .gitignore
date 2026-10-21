@@ -53,4 +53,9 @@ tests/coverage/
 tests-manual/
 
 # Documentation (internal, not for public repo)
-Documentazione/config/campaign_pipelines.php
+Documentazione/
+
+# Mappe pipeline reali (si versionano solo gli .example.php)
+config/campaign_pipelines.php
+config/lead_field_pipelines.php
+
