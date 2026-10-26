@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Pipeline per campo del lead (es. landing di provenienza).
+ * Pipeline per campo del lead (landing di provenienza).
  *
  * La landing passa un valore al widget In.Voice con ivGetExtraParams() (manuale ECO
  * §10.3.4); il valore torna nei dati del lead, nel campo del tracciato che Enel abilita.
@@ -11,10 +11,13 @@
  * - map:   valore del campo => pipeline (CATEGORY_ID).
  * I lead senza il campo, o con un valore non in mappa, seguono campaign_pipelines.php e
  * poi PIPELINE del .env: la landing esistente non cambia.
+ *
+ * Enel 26/10/2026: campo SOURCE_TYPE, var_a = landing originale (resta su PIPELINE del .env),
+ * var_b = agenziaenel.com/offerta-luce-gas → pipeline 29 (Geomad - Nuovo cliente).
  */
 return [
-    'field' => '',            // es. 'LANDING' — da Enel
+    'field' => 'SOURCE_TYPE',
     'map' => [
-        'offerta-luce-gas' => 29, // Geomad - Nuovo cliente
+        'var_b' => 29, // Geomad - Nuovo cliente
     ],
 ];
