@@ -12,12 +12,12 @@
  * I lead senza il campo, o con un valore non in mappa, seguono campaign_pipelines.php e
  * poi PIPELINE del .env: la landing esistente non cambia.
  *
- * Enel 26/10/2026: campo SOURCE_TYPE, var_a = landing originale (resta su PIPELINE del .env),
- * var_b = agenziaenel.com/offerta-luce-gas → pipeline 29 (Geomad - Nuovo cliente).
+ * Enel 26/10/2026: campo SOURCE_TYPE, WIDGET_A = landing originale (resta su PIPELINE del .env),
+ * WIDGET_B = agenziaenel.com/offerta-luce-gas → pipeline 29 (Geomad - Nuovo cliente).
  */
 return [
     'field' => 'SOURCE_TYPE',
     'map' => [
-        'var_b' => 29, // Geomad - Nuovo cliente
+        'WIDGET_B' => 29, // Geomad - Nuovo cliente
     ],
 ];
