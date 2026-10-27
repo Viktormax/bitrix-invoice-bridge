@@ -378,36 +378,56 @@ class Bitrix24ApiClient
     }
 
     /**
-     * Rule for routing leads by a field of the lead itself (config/lead_field_pipelines.php).
+     * Rules for routing leads by a field of the lead itself (config/lead_field_pipelines.php).
      *
      * Used with the In.Voice widget "extra params" (ivGetExtraParams in the landing page):
      * the landing sends a value in a campaign field and it comes back in the lead data.
+     * The config is one rule (field + map) or a list of them under 'rules', tried in order.
      *
-     * @return array{field: string, map: array<string,int>} Empty field = rule disabled
+     * @return array<int, array{field: string, map: array<string,int>}> Empty = rule disabled
      */
     public static function getLeadFieldPipelineRule(): array
     {
-        static $rule = null;
+        static $rules = null;
 
-        if ($rule === null) {
+        if ($rules === null) {
             $configFile = __DIR__ . '/../config/lead_field_pipelines.php';
             $loaded = file_exists($configFile) ? require $configFile : [];
-            $rule = [
-                'field' => is_array($loaded) ? trim((string)($loaded['field'] ?? '')) : '',
-                'map' => is_array($loaded) && is_array($loaded['map'] ?? null) ? $loaded['map'] : [],
-            ];
+            $rules = self::normalizeLeadFieldRules(is_array($loaded) ? $loaded : []);
         }
 
-        return $rule;
+        return $rules;
+    }
+
+    /**
+     * @return array<int, array{field: string, map: array<string,int>}>
+     */
+    private static function normalizeLeadFieldRules(array $config): array
+    {
+        $list = isset($config['rules']) && is_array($config['rules']) ? $config['rules'] : [$config];
+        $rules = [];
+        foreach ($list as $rule) {
+            if (!is_array($rule)) {
+                continue;
+            }
+            $field = trim((string)($rule['field'] ?? ''));
+            if ($field === '') {
+                continue;
+            }
+            $rules[] = ['field' => $field, 'map' => is_array($rule['map'] ?? null) ? $rule['map'] : []];
+        }
+        return $rules;
     }
 
     /**
      * Pipeline (CATEGORY_ID) for one lead.
      *
-     * 1. value of the configured lead field (e.g. the landing page), if it is in the map;
+     * 1. value of a configured lead field (e.g. the landing page), if it is in the map;
      * 2. otherwise the campaign map (resolvePipelineId);
      * 3. otherwise the default pipeline (PIPELINE in .env).
      * Field name and value are matched case-insensitively, ignoring surrounding spaces.
+     * A value also matches when it starts with the map value followed by "-"
+     * (e.g. EXTERNAL_ID "WIDGET_B-1793…" matches "WIDGET_B").
      */
     public static function resolvePipelineForLead(
         array $lead,
@@ -416,10 +436,10 @@ class Bitrix24ApiClient
         ?array $fieldRule = null,
         ?array $campaignMap = null
     ): ?int {
-        $fieldRule = $fieldRule ?? self::getLeadFieldPipelineRule();
-        $field = strtolower(trim((string)($fieldRule['field'] ?? '')));
+        $rules = $fieldRule !== null ? self::normalizeLeadFieldRules($fieldRule) : self::getLeadFieldPipelineRule();
 
-        if ($field !== '') {
+        foreach ($rules as $rule) {
+            $field = strtolower($rule['field']);
             $value = null;
             foreach ($lead as $key => $v) {
                 if (strtolower(trim((string)$key)) === $field) {
@@ -427,11 +447,16 @@ class Bitrix24ApiClient
                     break;
                 }
             }
-            if ($value !== null && $value !== '') {
-                foreach (($fieldRule['map'] ?? []) as $mapValue => $pipelineId) {
-                    if (strtolower(trim((string)$mapValue)) === $value && (int)$pipelineId > 0) {
-                        return (int)$pipelineId;
-                    }
+            if ($value === null || $value === '') {
+                continue;
+            }
+            foreach ($rule['map'] as $mapValue => $pipelineId) {
+                $mapValue = strtolower(trim((string)$mapValue));
+                if ($mapValue === '' || (int)$pipelineId <= 0) {
+                    continue;
+                }
+                if ($value === $mapValue || strpos($value, $mapValue . '-') === 0) {
+                    return (int)$pipelineId;
                 }
             }
         }
